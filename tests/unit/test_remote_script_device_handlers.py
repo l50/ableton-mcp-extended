@@ -119,7 +119,7 @@ def synth():
         Param("Filter Freq", 500.0, 20.0, 20000.0, display="500 Hz"),
         Param("Osc Type", 1.0, 0.0, 3.0, is_quantized=True, value_items=["Sine", "Saw"]),
         Param("Locked", 0.0, 0.0, 0.0, is_enabled=False),
-    ])
+    ], device_type=1)
 
 
 def rack(chains):
@@ -177,9 +177,12 @@ class TestDeviceDescriptors:
     @pytest.mark.parametrize("device,expected", [
         (Device(drum_pads=[]), "drum_machine"),
         (Device(chains=[]), "rack"),
-        (Device(class_name="X", class_display_name="Simpler Instrument"), "instrument"),
-        (Device(class_name="Audio_Effect_Thing", class_display_name="Reverb"), "audio_effect"),
-        (Device(class_name="midi_effect_arp", class_display_name="Arpeggiator"), "midi_effect"),
+        (Device(class_name="X", class_display_name="Simpler Instrument", device_type=1),
+         "instrument"),
+        (Device(class_name="Audio_Effect_Thing", class_display_name="Reverb", device_type=2),
+         "audio_effect"),
+        (Device(class_name="midi_effect_arp", class_display_name="Arpeggiator", device_type=4),
+         "midi_effect"),
         (Device(class_name="Mystery", class_display_name="Mystery"), "unknown"),
         (object(), "unknown"),
     ])
@@ -360,7 +363,8 @@ class TestChainInfo:
 
 class TestDrumPadInfo:
     def test_lists_only_filled_pads(self):
-        kick_chain = Chain("Kick", [Device("Simpler", "OriginalSimpler", "Simpler Instrument")])
+        kick_chain = Chain("Kick", [Device("Simpler", "OriginalSimpler", "Simpler Instrument",
+                                           device_type=1)])
         drum_rack = Device("Drum Rack", "DrumGroupDevice", "Drum Rack", drum_pads=[
             Pad(36, "Kick", [kick_chain], mute=True),
             Pad(37, "Empty"),

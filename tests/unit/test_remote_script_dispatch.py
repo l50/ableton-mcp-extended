@@ -178,7 +178,7 @@ class TestProcessCommandRouting:
         assert response["status"] == "error"
         assert response["message"] == "Timeout waiting for operation to complete"
 
-    def test_write_with_none_result_returns_empty_result(self):
+    def test_write_with_none_result_passes_none_through(self):
         script = _make_script()
         script._start_playback = MagicMock(return_value=None)
         response = script._process_command({"type": "start_playback"})
