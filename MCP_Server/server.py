@@ -741,8 +741,9 @@ def set_track_arm(
 ) -> str:
     """Arm or disarm a track for recording.
 
-    Group, return and master tracks have no Arm state and are refused, as are
-    frozen tracks. Check get_recording_status before recording.
+    Group, return and master tracks have no Arm state and are refused. A
+    frozen track cannot be armed (disarming it works). Check
+    get_recording_status before recording.
 
     Parameters:
     - track_index: Track number (1-based, groups included). 0 = use track_name.
