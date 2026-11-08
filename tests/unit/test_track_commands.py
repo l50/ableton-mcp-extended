@@ -1,4 +1,5 @@
 """Unit tests for track-level MCP tools."""
+import json
 import sys
 import os
 from unittest.mock import MagicMock, patch
@@ -120,13 +121,15 @@ class TestTrackMuteSoloArm:
     @patch('MCP_Server.server.get_ableton_connection')
     def test_mute_converts_the_index_and_reports_the_name(self, mock_conn):
         mock_ableton = MagicMock()
-        mock_ableton.send_command.return_value = {"track_name": "Bass",
-                                                  "mute": True}
+        mock_ableton.send_command.return_value = {
+            "track": {"index": 2, "name": "Bass"}, "mute": True}
         mock_conn.return_value = mock_ableton
 
-        result = set_track_mute(MagicMock(), track_index=3, mute=True)
+        result = json.loads(set_track_mute(MagicMock(), track_index=3, mute=True))
 
-        assert "Bass" in result and "muted" in result
+        assert result["ok"] is True
+        assert result["track"] == {"index": 3, "name": "Bass"}
+        assert result["mute"] is True
         call = mock_ableton.send_command.call_args
         assert call[0][0] == "set_track_mute"
         assert call[0][1]["track_index"] == 2      # 3 (1-based) -> 2 (0-based)
@@ -135,24 +138,24 @@ class TestTrackMuteSoloArm:
     @patch('MCP_Server.server.get_ableton_connection')
     def test_unmute_reads_as_unmuted(self, mock_conn):
         mock_ableton = MagicMock()
-        mock_ableton.send_command.return_value = {"track_name": "Bass",
-                                                  "mute": False}
+        mock_ableton.send_command.return_value = {
+            "track": {"index": 0, "name": "Bass"}, "mute": False}
         mock_conn.return_value = mock_ableton
 
-        result = set_track_mute(MagicMock(), track_index=1, mute=False)
+        result = json.loads(set_track_mute(MagicMock(), track_index=1, mute=False))
 
-        assert "unmuted" in result
+        assert result["mute"] is False
 
     @patch('MCP_Server.server.get_ableton_connection')
     def test_solo_converts_the_index(self, mock_conn):
         mock_ableton = MagicMock()
-        mock_ableton.send_command.return_value = {"track_name": "Drums",
-                                                  "solo": True}
+        mock_ableton.send_command.return_value = {
+            "track": {"index": 1, "name": "Drums"}, "solo": True}
         mock_conn.return_value = mock_ableton
 
-        result = set_track_solo(MagicMock(), track_index=2, solo=True)
+        result = json.loads(set_track_solo(MagicMock(), track_index=2, solo=True))
 
-        assert "Drums" in result and "soloed" in result
+        assert result["track"]["name"] == "Drums" and result["solo"] is True
         call = mock_ableton.send_command.call_args
         assert call[0][0] == "set_track_solo"
         assert call[0][1]["track_index"] == 1
@@ -160,13 +163,13 @@ class TestTrackMuteSoloArm:
     @patch('MCP_Server.server.get_ableton_connection')
     def test_arm_converts_the_index(self, mock_conn):
         mock_ableton = MagicMock()
-        mock_ableton.send_command.return_value = {"track_name": "Synth",
-                                                  "arm": True}
+        mock_ableton.send_command.return_value = {
+            "track": {"index": 3, "name": "Synth"}, "arm": True}
         mock_conn.return_value = mock_ableton
 
-        result = set_track_arm(MagicMock(), track_index=4, arm=True)
+        result = json.loads(set_track_arm(MagicMock(), track_index=4, arm=True))
 
-        assert "Synth" in result and "armed" in result
+        assert result["track"] == {"index": 4, "name": "Synth"}
         call = mock_ableton.send_command.call_args
         assert call[0][0] == "set_track_arm"
         assert call[0][1]["track_index"] == 3

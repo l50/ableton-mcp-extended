@@ -224,7 +224,17 @@ class AbletonMCP(ControlSurface):
                 response["result"] = self._get_session_info()
             elif command_type == "get_track_info":
                 track_index = params.get("track_index", 0)
-                response["result"] = self._get_track_info(track_index)
+                include_clip_slots = params.get("include_clip_slots", True)
+                response["result"] = self._get_track_info(
+                    track_index, include_clip_slots)
+            elif command_type == "get_track_routing_options":
+                response["result"] = self._get_track_routing_options(params)
+            elif command_type == "get_recording_status":
+                response["result"] = self._get_recording_status()
+            elif command_type == "list_tracks":
+                response["result"] = self._list_tracks(
+                    params.get("include_returns", True),
+                    params.get("include_master", True))
             # Commands that modify Live's state should be scheduled on the main thread
             elif command_type in ["create_midi_track", "set_track_name",
                                  "create_clip", "add_notes_to_clip", "set_clip_name",
@@ -243,7 +253,8 @@ class AbletonMCP(ControlSurface):
                                  "delete_track",
                                  "set_track_volume", "set_track_panning",
                                  "set_track_mute", "set_track_solo",
-                                 "set_track_arm"]:
+                                 "set_track_arm", "set_track_input",
+                                 "set_track_monitoring", "set_tracks_state"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -390,17 +401,17 @@ class AbletonMCP(ControlSurface):
                             panning = params.get("panning", 0.0)
                             result = self._set_track_panning(ti, panning)
                         elif command_type == "set_track_mute":
-                            ti = params.get("track_index", 0)
-                            mute = params.get("mute", True)
-                            result = self._set_track_mute(ti, mute)
+                            result = self._set_track_mute(params)
                         elif command_type == "set_track_solo":
-                            ti = params.get("track_index", 0)
-                            solo = params.get("solo", True)
-                            result = self._set_track_solo(ti, solo)
+                            result = self._set_track_solo(params)
                         elif command_type == "set_track_arm":
-                            ti = params.get("track_index", 0)
-                            arm = params.get("arm", True)
-                            result = self._set_track_arm(ti, arm)
+                            result = self._set_track_arm(params)
+                        elif command_type == "set_track_input":
+                            result = self._set_track_input(params)
+                        elif command_type == "set_track_monitoring":
+                            result = self._set_track_monitoring(params)
+                        elif command_type == "set_tracks_state":
+                            result = self._set_tracks_state(params)
                         elif command_type == "navigate_preset":
                             ti = params.get("track_index", 0)
                             di = params.get("device_index", 0)
@@ -590,8 +601,10 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error getting session info: " + str(e))
             raise
     
-    def _get_track_info(self, track_index):
-        """Get information about a track"""
+    def _get_track_info(self, track_index, include_clip_slots=True):
+        """Get information about a track, including its routing, monitoring,
+        arm and group state. include_clip_slots=False leaves out the session
+        clip slots, which are the bulk of the reply on large Sets."""
         try:
             if track_index < 0 or track_index >= len(self._song.tracks):
                 raise IndexError("Track index out of range")
@@ -600,7 +613,8 @@ class AbletonMCP(ControlSurface):
             
             # Get clip slots
             clip_slots = []
-            for slot_index, slot in enumerate(track.clip_slots):
+            for slot_index, slot in enumerate(
+                    track.clip_slots if include_clip_slots else []):
                 clip_info = None
                 if slot.has_clip:
                     clip = slot.clip
@@ -643,6 +657,35 @@ class AbletonMCP(ControlSurface):
                 "clip_slots": clip_slots,
                 "devices": devices
             }
+            if not include_clip_slots:
+                del result["clip_slots"]
+
+            group = self._safe_attr(track, "group_track")
+            is_grouped = bool(self._safe_attr(track, "is_grouped", False))
+            group_ref = None
+            if is_grouped and group is not None:
+                group_ref = {"index": self._index_of(group, self._song.tracks),
+                             "name": group.name}
+            take_lanes = self._safe_attr(track, "take_lanes")
+            result.update({
+                "input": self._routing(track, "input"),
+                "output": self._routing(track, "output"),
+                "monitoring": self._monitoring_name(track),
+                "can_be_armed": self._can_arm(track),
+                "implicit_arm": self._safe_attr(track, "implicit_arm"),
+                "is_foldable": is_group,
+                "fold_state": (bool(self._safe_attr(track, "fold_state", False))
+                               if is_group else None),
+                "is_grouped": is_grouped,
+                "group_track": group_ref,
+                "is_visible": self._safe_attr(track, "is_visible"),
+                "muted_via_solo": self._safe_attr(track, "muted_via_solo"),
+                "is_frozen": self._safe_attr(track, "is_frozen"),
+                "color": self._safe_attr(track, "color"),
+                "arrangement_clip_count": self._arrangement_clip_count(track),
+                "take_lane_count": (len(list(take_lanes))
+                                    if take_lanes is not None else None),
+            })
             return result
         except Exception as e:
             self.log_message("Error getting track info: " + str(e))
@@ -758,88 +801,779 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error setting track panning: " + str(e))
             raise
 
-    def _set_track_mute(self, track_index, mute):
-        """Mute or unmute a track.
+    # Track addressing and recording-safety helpers
+    #
+    # Every handler below addresses its track through _resolve_track, so a
+    # command can name a track by index, by name, or (where it makes sense) as
+    # a return track, and can carry an expect_name guard. Indices on the wire
+    # are 0-based like the rest of this script, but error messages quote the
+    # 1-based numbers the MCP tools show to callers.
 
-        Args:
-            track_index: 0-based track index (includes return tracks after
-                session tracks)
-            mute: True to mute, False to unmute
-        """
+    _TRACK_REF_KEYS = ("track_index", "track_name", "return_track_index",
+                       "expect_name")
+    _TRACK_STATE_KEYS = ("mute", "solo", "arm", "input_type", "input_channel",
+                         "monitoring")
+    _NO_INPUT = "no input"
+
+    @staticmethod
+    def _safe_attr(obj, name, default=None):
+        """getattr that also swallows the RuntimeError Live raises for
+        properties a track kind does not have (e.g. arm on a group)."""
         try:
-            all_tracks = list(self._song.tracks) + list(self._song.return_tracks)
-            if track_index < 0 or track_index >= len(all_tracks):
-                raise IndexError("Track index {0} out of range (0-{1})".format(
-                    track_index, len(all_tracks) - 1))
-            track = all_tracks[track_index]
-            track.mute = bool(mute)
+            return getattr(obj, name, default)
+        except Exception:
+            return default
+
+    @staticmethod
+    def _return_track_label(index):
+        if 0 <= index < 26:
+            return chr(ord("A") + index)
+        return str(index + 1)
+
+    @staticmethod
+    def _routing_name(routing):
+        if routing is None:
+            return None
+        return getattr(routing, "display_name", None)
+
+    def _index_of(self, track, pool):
+        for i, candidate in enumerate(pool):
+            if candidate is track:
+                return i
+        return None
+
+    def _track_ref(self, track):
+        """Compact reference to a track: index for tracks, letter for returns."""
+        index = self._index_of(track, self._song.tracks)
+        if index is not None:
+            return {"index": index, "name": track.name}
+        index = self._index_of(track, self._song.return_tracks)
+        if index is not None:
+            return {"return_track": self._return_track_label(index),
+                    "name": track.name}
+        return {"master": True, "name": track.name}
+
+    def _describe_track(self, track):
+        index = self._index_of(track, self._song.tracks)
+        if index is not None:
+            return "'{0}' (track_index {1})".format(track.name, index + 1)
+        index = self._index_of(track, self._song.return_tracks)
+        return "'{0}' (return_track {1})".format(
+            track.name, self._return_track_label(index))
+
+    def _check_expect_name(self, track, expect_name):
+        """Fail when the addressed track is not the one the caller expects.
+
+        Track indices shift whenever tracks are inserted or groups change, so
+        a write that carries expect_name refuses to touch a different track.
+        """
+        if expect_name in (None, ""):
+            return
+        actual = track.name or ""
+        if actual.lower() != str(expect_name).lower():
+            raise ValueError(
+                "expect_name mismatch: expected '{0}' but the addressed track "
+                "is '{1}'; nothing was changed".format(expect_name, actual))
+
+    def _resolve_track(self, params, allow_returns=False):
+        """Return the Track that params address.
+
+        params holds exactly one of track_index (0-based over song.tracks,
+        groups included), track_name (case-insensitive exact match) or
+        return_track_index (0-based over song.return_tracks, only when
+        allow_returns). An optional expect_name must match the resolved
+        track's name. Raises IndexError or ValueError naming the problem.
+        """
+        tracks = list(self._song.tracks)
+        returns = list(self._song.return_tracks)
+        track_index = params.get("track_index")
+        track_name = params.get("track_name") or ""
+        return_index = params.get("return_track_index")
+
+        given = []
+        if track_index is not None:
+            given.append("track_index")
+        if track_name:
+            given.append("track_name")
+        if return_index is not None:
+            given.append("return_track_index")
+        if len(given) != 1:
+            raise ValueError(
+                "Give exactly one of track_index, track_name or return_track "
+                "(got {0})".format(", ".join(given) or "none"))
+
+        if track_index is not None:
+            track_index = int(track_index)
+            if track_index < 0 or track_index >= len(tracks):
+                raise IndexError(
+                    "track_index {0} is out of range: the Set has {1} "
+                    "track(s) (1-{1})".format(track_index + 1, len(tracks)))
+            track = tracks[track_index]
+        elif return_index is not None:
+            if not allow_returns:
+                raise ValueError(
+                    "This command does not apply to return tracks")
+            return_index = int(return_index)
+            if return_index < 0 or return_index >= len(returns):
+                raise IndexError(
+                    "return_track {0} does not exist: the Set has {1} return "
+                    "track(s)".format(self._return_track_label(return_index),
+                                      len(returns)))
+            track = returns[return_index]
+        else:
+            wanted = track_name.lower()
+            pool = tracks + (returns if allow_returns else [])
+            matches = [t for t in pool if (t.name or "").lower() == wanted]
+            if not matches:
+                raise ValueError("No track named '{0}'. Tracks: {1}".format(
+                    track_name, ", ".join(
+                        "'{0}'".format(t.name) for t in pool) or "(none)"))
+            if len(matches) > 1:
+                raise ValueError(
+                    "Track name '{0}' is ambiguous; {1} tracks match: {2}. "
+                    "Use track_index or return_track instead.".format(
+                        track_name, len(matches), ", ".join(
+                            self._describe_track(t) for t in matches)))
+            track = matches[0]
+
+        self._check_expect_name(track, params.get("expect_name"))
+        return track
+
+    def _is_return(self, track):
+        return self._index_of(track, self._song.return_tracks) is not None
+
+    def _is_group(self, track):
+        return bool(self._safe_attr(track, "is_foldable", False))
+
+    def _can_arm(self, track):
+        if self._is_group(track) or self._is_return(track):
+            return False
+        return bool(self._safe_attr(track, "can_be_armed", True))
+
+    def _require_armable(self, track):
+        if self._is_group(track):
+            raise ValueError(
+                "Track '{0}' is a group track and has no Arm state".format(
+                    track.name))
+        if not self._can_arm(track):
+            raise ValueError(
+                "Track '{0}' cannot be armed (group, return and master tracks "
+                "have no Arm state)".format(track.name))
+
+    def _track_kind(self, track):
+        if self._is_return(track):
+            return "return"
+        if self._index_of(track, self._song.tracks) is None:
+            return "master"
+        if self._is_group(track):
+            return "group"
+        if self._safe_attr(track, "has_midi_input", False):
+            return "midi"
+        if self._safe_attr(track, "has_audio_input", False):
+            return "audio"
+        return "unknown"
+
+    def _routing(self, track, direction):
+        current = self._safe_attr(track, direction + "_routing_type")
+        if current is None:
+            return None
+        return {
+            "type": self._routing_name(current),
+            "channel": self._routing_name(
+                self._safe_attr(track, direction + "_routing_channel")),
+        }
+
+    def _monitoring_states(self):
+        """Map 'in'/'auto'/'off' to Live's Track.monitoring_states values."""
+        try:
+            import Live
+            states = Live.Track.Track.monitoring_states
+            return {"in": states.IN, "auto": states.AUTO, "off": states.OFF}
+        except Exception:
+            # Live's enum values; used when the Live module is not importable.
+            return {"in": 0, "auto": 1, "off": 2}
+
+    def _monitoring_name(self, track):
+        value = self._safe_attr(track, "current_monitoring_state")
+        if value is None:
+            return None
+        for name, state in self._monitoring_states().items():
+            if value == state:
+                return name
+        return str(value)
+
+    def _require_monitorable(self, track):
+        if self._is_group(track):
+            raise ValueError(
+                "Track '{0}' is a group track and has no monitoring "
+                "state".format(track.name))
+        if not self._can_arm(track):
+            raise ValueError(
+                "Track '{0}' has no monitoring state (return and master "
+                "tracks cannot be monitored)".format(track.name))
+        if not hasattr(track, "current_monitoring_state"):
+            raise ValueError(
+                "Monitoring is not available in this Live version")
+        if self._safe_attr(track, "is_frozen", False):
+            raise ValueError(
+                "Track '{0}' is frozen; unfreeze it before changing "
+                "monitoring".format(track.name))
+
+    def _require_input_routing(self, track):
+        if self._is_group(track):
+            raise ValueError(
+                "Track '{0}' is a group track and has no input "
+                "routing".format(track.name))
+        if self._is_return(track):
+            raise ValueError(
+                "Track '{0}' is a return track and has no input "
+                "routing".format(track.name))
+        if not hasattr(track, "available_input_routing_types"):
+            raise ValueError(
+                "Input routing is not available in this Live version")
+
+    def _match_routing(self, options, wanted, label):
+        wanted_lower = wanted.lower()
+        for option in options:
+            if (self._routing_name(option) or "").lower() == wanted_lower:
+                return option
+        raise ValueError("No {0} named '{1}'. Valid: {2}".format(
+            label, wanted, ", ".join(
+                "'{0}'".format(self._routing_name(o)) for o in options)
+            or "(none)"))
+
+    def _apply_input(self, track, input_type, input_channel):
+        """Set the input type (and optionally channel) by display name.
+
+        The type is assigned only when it differs from the current one, so a
+        retry that names the current type only changes the channel. When the
+        channel is not offered after the type change, the previous type and
+        channel are restored before the error is raised.
+        """
+        target = self._match_routing(
+            list(track.available_input_routing_types), input_type,
+            "input type")
+        previous_type = self._safe_attr(track, "input_routing_type")
+        previous_channel = self._safe_attr(track, "input_routing_channel")
+        type_changed = ((self._routing_name(previous_type) or "").lower()
+                        != input_type.lower())
+        if type_changed:
+            track.input_routing_type = target
+        if not input_channel:
+            return
+        channels = list(self._safe_attr(
+            track, "available_input_routing_channels", []) or [])
+        try:
+            channel = self._match_routing(channels, input_channel,
+                                          "input channel")
+        except ValueError as e:
+            if type_changed:
+                track.input_routing_type = previous_type
+                if previous_channel is not None:
+                    track.input_routing_channel = previous_channel
+                raise ValueError(
+                    "{0} for input type '{1}'. The input was left "
+                    "unchanged. If Live had not refreshed the channel list "
+                    "yet, repeat the call.".format(e, input_type))
+            raise
+        track.input_routing_channel = channel
+
+    def _arm_warnings(self, track, include_others=True):
+        warnings = []
+        armed = bool(self._safe_attr(track, "arm", False))
+        if armed:
+            current_input = self._routing(track, "input")
+            if (current_input and (current_input.get("type") or "").lower()
+                    == self._NO_INPUT):
+                warnings.append(
+                    "'{0}' is armed with input 'No Input', so it records "
+                    "nothing".format(track.name))
+            if self._monitoring_name(track) == "in":
+                warnings.append(
+                    "'{0}' has monitoring 'In', so its input is always "
+                    "audible".format(track.name))
+            if include_others:
+                others = [t.name for t in self._song.tracks
+                          if t is not track and self._can_arm(t)
+                          and self._safe_attr(t, "arm", False)]
+                if others:
+                    warnings.append("Other tracks are still armed: {0}".format(
+                        ", ".join(others)))
+        if self._safe_attr(track, "implicit_arm", False):
+            warnings.append(
+                "'{0}' has implicit_arm set (Live's auto-arm on selection), "
+                "so it can record even when arm is off".format(track.name))
+        return warnings
+
+    def _track_state(self, track):
+        """Mixer and recording state, as reported by set_tracks_state."""
+        return {
+            "mute": self._safe_attr(track, "mute"),
+            "solo": self._safe_attr(track, "solo"),
+            "arm": (bool(self._safe_attr(track, "arm", False))
+                    if self._can_arm(track) else None),
+            "input": self._routing(track, "input"),
+            "monitoring": self._monitoring_name(track),
+        }
+
+    def _raw_state(self, track):
+        """Raw Live values captured before a batch, for rollback."""
+        raw = {"mute": self._safe_attr(track, "mute"),
+               "solo": self._safe_attr(track, "solo")}
+        if self._can_arm(track):
+            raw["arm"] = self._safe_attr(track, "arm")
+        for attr in ("input_routing_type", "input_routing_channel",
+                     "current_monitoring_state"):
+            value = self._safe_attr(track, attr)
+            if value is not None:
+                raw[attr] = value
+        return raw
+
+    def _restore_raw(self, track, raw):
+        errors = []
+        for attr in ("input_routing_type", "input_routing_channel",
+                     "current_monitoring_state", "mute", "solo", "arm"):
+            if attr not in raw or raw[attr] is None:
+                continue
+            try:
+                if self._safe_attr(track, attr) != raw[attr]:
+                    setattr(track, attr, raw[attr])
+            except Exception as e:
+                errors.append("{0}.{1}: {2}".format(track.name, attr, e))
+        return errors
+
+    def _arrangement_clip_count(self, track):
+        try:
+            return len(list(track.arrangement_clips))
+        except Exception:
+            return None
+
+    # Recording-safety command implementations
+
+    def _set_track_mute(self, params):
+        """Mute or unmute a track or return track."""
+        try:
+            track = self._resolve_track(params, allow_returns=True)
+            track.mute = bool(params.get("mute", True))
             return {
-                "track_name": track.name,
-                "mute": track.mute,
+                "track": self._track_ref(track),
+                "mute": bool(track.mute),
+                "solo": bool(self._safe_attr(track, "solo", False)),
+                "muted_via_solo": bool(
+                    self._safe_attr(track, "muted_via_solo", False)),
             }
         except Exception as e:
             self.log_message("Error setting track mute: " + str(e))
             raise
 
-    def _set_track_solo(self, track_index, solo):
-        """Solo or unsolo a track.
+    def _set_track_solo(self, params):
+        """Solo or unsolo a track or return track.
 
-        Args:
-            track_index: 0-based track index (includes return tracks after
-                session tracks)
-            solo: True to solo, False to unsolo
+        Live's API bypasses exclusive solo, so with exclusive=True this
+        unsolos every other track and return track itself, in the same task.
         """
         try:
-            all_tracks = list(self._song.tracks) + list(self._song.return_tracks)
-            if track_index < 0 or track_index >= len(all_tracks):
-                raise IndexError("Track index {0} out of range (0-{1})".format(
-                    track_index, len(all_tracks) - 1))
-            track = all_tracks[track_index]
-            track.solo = bool(solo)
+            track = self._resolve_track(params, allow_returns=True)
+            solo = bool(params.get("solo", True))
+            unsoloed = []
+            if solo and params.get("exclusive", False):
+                pool = list(self._song.tracks) + list(self._song.return_tracks)
+                for other in pool:
+                    if other is not track and self._safe_attr(other, "solo",
+                                                              False):
+                        other.solo = False
+                        unsoloed.append(other.name)
+            track.solo = solo
             return {
-                "track_name": track.name,
-                "solo": track.solo,
+                "track": self._track_ref(track),
+                "solo": bool(track.solo),
+                "unsoloed": unsoloed,
             }
         except Exception as e:
             self.log_message("Error setting track solo: " + str(e))
             raise
 
-    def _set_track_arm(self, track_index, arm):
-        """Arm or unarm a track for recording.
+    def _set_track_arm(self, params):
+        """Arm or disarm a track for recording.
 
-        Args:
-            track_index: 0-based index into the SESSION tracks only
-            arm: True to arm, False to unarm
-
-        Unlike mute and solo, Arm does not exist on every track: group, master
-        and return tracks have no Arm state, and touching track.arm on one
-        raises inside Live ("Master and Return Tracks have no 'Arm' state!").
-        So this refuses them with a clear message rather than letting that
-        surface as an opaque error. _get_track_info already takes the same
-        position, reporting "arm": None for a group track.
+        Group, return and master tracks have no Arm state, and touching
+        track.arm on one raises inside Live, so they are refused with a clear
+        message first. Frozen tracks cannot be armed. With exclusive=True,
+        every other armed track is disarmed in the same main-thread task.
         """
         try:
-            session_tracks = list(self._song.tracks)
-            if track_index < 0 or track_index >= len(session_tracks):
-                raise IndexError(
-                    "Track index {0} out of range (0-{1}). Return and master "
-                    "tracks have no Arm state.".format(
-                        track_index, len(session_tracks) - 1))
-            track = session_tracks[track_index]
-            if bool(getattr(track, "is_foldable", False)):
+            track = self._resolve_track(params)
+            arm = bool(params.get("arm", True))
+            self._require_armable(track)
+            if arm and self._safe_attr(track, "is_frozen", False):
                 raise ValueError(
-                    "Track '{0}' is a group track and has no Arm state".format(
-                        track.name))
-            if not getattr(track, "can_be_armed", True):
-                raise ValueError(
-                    "Track '{0}' cannot be armed".format(track.name))
-            track.arm = bool(arm)
+                    "Track '{0}' is frozen; unfreeze it before "
+                    "arming".format(track.name))
+            disarmed = []
+            if arm and params.get("exclusive", False):
+                for other in self._song.tracks:
+                    if (other is not track and self._can_arm(other)
+                            and self._safe_attr(other, "arm", False)):
+                        other.arm = False
+                        disarmed.append(other.name)
+            track.arm = arm
             return {
-                "track_name": track.name,
-                "arm": track.arm,
+                "track": self._track_ref(track),
+                "arm": bool(track.arm),
+                "implicit_arm": bool(
+                    self._safe_attr(track, "implicit_arm", False)),
+                "input": self._routing(track, "input"),
+                "monitoring": self._monitoring_name(track),
+                "disarmed": disarmed,
+                "warnings": self._arm_warnings(track),
             }
         except Exception as e:
             self.log_message("Error setting track arm: " + str(e))
+            raise
+
+    def _get_track_routing_options(self, params):
+        """Current input/output routing plus the names Live offers."""
+        try:
+            track = self._resolve_track(params, allow_returns=True)
+            result = {"track": self._track_ref(track)}
+            for direction in ("input", "output"):
+                current = self._routing(track, direction)
+                types = list(self._safe_attr(
+                    track, "available_{0}_routing_types".format(direction),
+                    []) or [])
+                if current is None and not types:
+                    result[direction] = None
+                    continue
+                channels = list(self._safe_attr(
+                    track, "available_{0}_routing_channels".format(direction),
+                    []) or [])
+                result[direction] = {
+                    "current": current,
+                    "types": [self._routing_name(t) for t in types],
+                    "channels": [self._routing_name(c) for c in channels],
+                }
+            return result
+        except Exception as e:
+            self.log_message("Error getting routing options: " + str(e))
+            raise
+
+    def _set_track_input(self, params):
+        """Set a track's input type and channel by display name."""
+        try:
+            track = self._resolve_track(params)
+            input_type = params.get("input_type") or ""
+            input_channel = params.get("input_channel") or ""
+            if not input_type:
+                raise ValueError("input_type is required")
+            self._require_input_routing(track)
+            self._apply_input(track, input_type, input_channel)
+            warnings = []
+            current_input = self._routing(track, "input")
+            if (((current_input or {}).get("type") or "").lower()
+                    == self._NO_INPUT
+                    and self._can_arm(track)
+                    and self._safe_attr(track, "arm", False)):
+                warnings.append(
+                    "'{0}' is still armed with input 'No Input'; disarm it "
+                    "if it should not record".format(track.name))
+            return {
+                "track": self._track_ref(track),
+                "input": current_input,
+                "available_channels": [
+                    self._routing_name(c) for c in list(self._safe_attr(
+                        track, "available_input_routing_channels", [])
+                        or [])],
+                "arm": (bool(self._safe_attr(track, "arm", False))
+                        if self._can_arm(track) else None),
+                "warnings": warnings,
+            }
+        except Exception as e:
+            self.log_message("Error setting track input: " + str(e))
+            raise
+
+    def _set_track_monitoring(self, params):
+        """Set monitoring to 'in', 'auto' or 'off'."""
+        try:
+            track = self._resolve_track(params)
+            state = str(params.get("state") or "").lower()
+            states = self._monitoring_states()
+            if state not in states:
+                raise ValueError(
+                    "state must be one of in, auto, off (got '{0}')".format(
+                        params.get("state")))
+            self._require_monitorable(track)
+            track.current_monitoring_state = states[state]
+            return {
+                "track": self._track_ref(track),
+                "monitoring": self._monitoring_name(track),
+            }
+        except Exception as e:
+            self.log_message("Error setting track monitoring: " + str(e))
+            raise
+
+    def _plan_track_change(self, change, seen, number):
+        """Resolve and validate one set_tracks_state entry without writing."""
+        if not isinstance(change, dict):
+            raise ValueError("each change must be an object")
+        unknown = sorted(set(change) - set(self._TRACK_REF_KEYS)
+                         - set(self._TRACK_STATE_KEYS))
+        if unknown:
+            raise ValueError("unknown key(s): {0}".format(", ".join(unknown)))
+        requested = dict((k, change[k]) for k in self._TRACK_STATE_KEYS
+                         if change.get(k) is not None)
+        if not requested:
+            raise ValueError(
+                "nothing to change; give mute, solo, arm, input_type, "
+                "input_channel or monitoring")
+        track = self._resolve_track(change, allow_returns=True)
+        if id(track) in seen:
+            raise ValueError("'{0}' is already changed by change {1}".format(
+                track.name, seen[id(track)]))
+        seen[id(track)] = number
+
+        issues = []
+        for key in ("mute", "solo", "arm"):
+            if key in requested and not isinstance(requested[key], bool):
+                issues.append("{0} must be true or false".format(key))
+        if "arm" in requested:
+            try:
+                self._require_armable(track)
+            except ValueError as e:
+                issues.append(str(e))
+            else:
+                if (requested["arm"] is True
+                        and self._safe_attr(track, "is_frozen", False)):
+                    issues.append("Track '{0}' is frozen; unfreeze it before "
+                                  "arming".format(track.name))
+        if "input_type" in requested or "input_channel" in requested:
+            try:
+                self._require_input_routing(track)
+                current_type = self._routing_name(
+                    self._safe_attr(track, "input_routing_type")) or ""
+                input_type = requested.get("input_type") or current_type
+                if "input_type" in requested:
+                    self._match_routing(
+                        list(track.available_input_routing_types),
+                        input_type, "input type")
+                # A channel can be checked up front only when the type stays
+                # the same; after a type change Live offers a new channel list,
+                # which is checked during the apply (and rolled back on error).
+                if (requested.get("input_channel")
+                        and input_type.lower() == current_type.lower()):
+                    self._match_routing(
+                        list(self._safe_attr(
+                            track, "available_input_routing_channels", [])
+                            or []),
+                        requested["input_channel"], "input channel")
+            except ValueError as e:
+                issues.append(str(e))
+        if "monitoring" in requested:
+            state = str(requested["monitoring"]).lower()
+            if state not in self._monitoring_states():
+                issues.append("monitoring must be one of in, auto, off "
+                              "(got '{0}')".format(requested["monitoring"]))
+            else:
+                try:
+                    self._require_monitorable(track)
+                except ValueError as e:
+                    issues.append(str(e))
+        if issues:
+            raise ValueError("; ".join(issues))
+        return {
+            "track": track,
+            "requested": requested,
+            "before": self._track_state(track),
+            "raw": self._raw_state(track),
+        }
+
+    def _apply_track_change(self, plan):
+        track = plan["track"]
+        requested = plan["requested"]
+        if "input_type" in requested or "input_channel" in requested:
+            current_type = self._routing_name(
+                self._safe_attr(track, "input_routing_type")) or ""
+            self._apply_input(track, requested.get("input_type") or current_type,
+                              requested.get("input_channel") or "")
+        if "monitoring" in requested:
+            states = self._monitoring_states()
+            track.current_monitoring_state = states[
+                str(requested["monitoring"]).lower()]
+        if "mute" in requested:
+            track.mute = requested["mute"]
+        if "solo" in requested:
+            track.solo = requested["solo"]
+        if "arm" in requested:
+            track.arm = requested["arm"]
+
+    def _set_tracks_state(self, params):
+        """Change several tracks' state in one validated batch.
+
+        Every entry is resolved and validated before anything is written; any
+        problem rejects the whole batch with every problem listed. With
+        dry_run=True nothing is written and the resolved targets are
+        returned. If Live rejects a write part-way, every track in the batch
+        is restored to its earlier state before the error is raised.
+        """
+        try:
+            changes = params.get("changes")
+            dry_run = bool(params.get("dry_run", False))
+            if not isinstance(changes, list) or not changes:
+                raise ValueError("changes must be a non-empty list")
+            plans, problems, seen = [], [], {}
+            for number, change in enumerate(changes, 1):
+                try:
+                    plans.append(self._plan_track_change(change, seen, number))
+                except (ValueError, IndexError, TypeError) as e:
+                    problems.append("change {0}: {1}".format(number, e))
+            if problems:
+                raise ValueError(
+                    "Rejected the whole batch; nothing was changed. " +
+                    "; ".join(problems))
+
+            if dry_run:
+                return {
+                    "dry_run": True,
+                    "changes": [{"track": self._track_ref(p["track"]),
+                                 "before": p["before"],
+                                 "requested": p["requested"]}
+                                for p in plans],
+                    "warnings": [],
+                }
+
+            applied = []
+            try:
+                for plan in plans:
+                    applied.append(plan)
+                    self._apply_track_change(plan)
+            except Exception as e:
+                rollback_errors = []
+                for plan in reversed(applied):
+                    rollback_errors.extend(
+                        self._restore_raw(plan["track"], plan["raw"]))
+                message = ("Live rejected the change to '{0}': {1}. Every "
+                           "track in the batch was restored".format(
+                               applied[-1]["track"].name, e))
+                if rollback_errors:
+                    message += ", except: " + "; ".join(rollback_errors)
+                raise RuntimeError(message)
+
+            warnings = []
+            for plan in plans:
+                if "arm" in plan["requested"] or "input_type" in plan["requested"]:
+                    warnings.extend(self._arm_warnings(plan["track"],
+                                                       include_others=False))
+            return {
+                "dry_run": False,
+                "changes": [{"track": self._track_ref(p["track"]),
+                             "before": p["before"],
+                             "after": self._track_state(p["track"])}
+                            for p in plans],
+                "warnings": warnings,
+            }
+        except Exception as e:
+            self.log_message("Error setting tracks state: " + str(e))
+            raise
+
+    def _get_recording_status(self):
+        """Pre-recording check: transport flags, armed tracks and warnings."""
+        try:
+            song = self._song
+            transport = {}
+            for key in ("is_playing", "record_mode", "session_record",
+                        "arrangement_overdub", "punch_in", "punch_out",
+                        "metronome", "count_in_duration", "loop",
+                        "exclusive_arm", "exclusive_solo"):
+                transport[key] = self._safe_attr(song, key)
+
+            armed_tracks, warnings, by_input = [], [], {}
+            for index, track in enumerate(song.tracks):
+                if not self._can_arm(track):
+                    continue
+                arm = bool(self._safe_attr(track, "arm", False))
+                implicit = bool(self._safe_attr(track, "implicit_arm", False))
+                current_input = self._routing(track, "input")
+                monitoring = self._monitoring_name(track)
+                if arm or implicit:
+                    armed_tracks.append({
+                        "index": index, "name": track.name, "arm": arm,
+                        "implicit_arm": implicit, "input": current_input,
+                        "monitoring": monitoring})
+                input_type = ((current_input or {}).get("type") or "")
+                if arm and input_type.lower() == self._NO_INPUT:
+                    warnings.append("'{0}' is armed with input 'No Input', "
+                                    "so it records nothing".format(track.name))
+                elif arm and current_input:
+                    key = (input_type, current_input.get("channel"))
+                    by_input.setdefault(key, []).append(track.name)
+                if implicit:
+                    warnings.append(
+                        "'{0}' has implicit_arm set (Live's auto-arm on "
+                        "selection), so it can record even when arm is "
+                        "off".format(track.name))
+                if monitoring == "in" and not arm:
+                    warnings.append(
+                        "'{0}' has monitoring 'In' while not armed, so its "
+                        "input is audible".format(track.name))
+            for (input_type, channel), names in sorted(by_input.items()):
+                if len(names) > 1:
+                    warnings.append(
+                        "{0} armed tracks share input '{1}' / '{2}': "
+                        "{3}".format(len(names), input_type, channel,
+                                     ", ".join(names)))
+            if transport["record_mode"] and not transport["is_playing"]:
+                warnings.append("Arrangement record is on while the "
+                                "transport is stopped; the next play "
+                                "records")
+            return {"transport": transport, "armed_tracks": armed_tracks,
+                    "warnings": warnings}
+        except Exception as e:
+            self.log_message("Error getting recording status: " + str(e))
+            raise
+
+    def _track_row(self, track, index):
+        is_group = self._is_group(track)
+        armable = self._can_arm(track)
+        group = self._safe_attr(track, "group_track")
+        return {
+            "index": index,
+            "name": track.name,
+            "kind": self._track_kind(track),
+            "group": (group.name if group is not None
+                      and self._safe_attr(track, "is_grouped", False)
+                      else None),
+            "folded": (bool(self._safe_attr(track, "fold_state", False))
+                       if is_group else None),
+            "visible": self._safe_attr(track, "is_visible"),
+            "mute": self._safe_attr(track, "mute"),
+            "solo": self._safe_attr(track, "solo"),
+            "muted_via_solo": self._safe_attr(track, "muted_via_solo"),
+            "arm": (bool(self._safe_attr(track, "arm", False))
+                    if armable else None),
+            "implicit_arm": self._safe_attr(track, "implicit_arm"),
+            "can_be_armed": armable,
+            "input": self._routing(track, "input"),
+            "monitoring": self._monitoring_name(track),
+            "output": self._routing(track, "output"),
+            "device_count": len(list(self._safe_attr(track, "devices", [])
+                                     or [])),
+            "arrangement_clip_count": self._arrangement_clip_count(track),
+        }
+
+    def _list_tracks(self, include_returns=True, include_master=True):
+        """One compact row per track, in a single pass."""
+        try:
+            rows = [self._track_row(t, i)
+                    for i, t in enumerate(self._song.tracks)]
+            if include_returns:
+                for i, track in enumerate(self._song.return_tracks):
+                    row = self._track_row(track, None)
+                    row["return_track"] = self._return_track_label(i)
+                    rows.append(row)
+            if include_master:
+                rows.append(self._track_row(self._song.master_track, None))
+            return {"tracks": rows}
+        except Exception as e:
+            self.log_message("Error listing tracks: " + str(e))
             raise
 
     def _create_clip(self, track_index, clip_index, length):

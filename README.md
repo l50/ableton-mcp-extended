@@ -37,6 +37,10 @@ This project provides comprehensive, programmatic control over the Ableton Live 
 * **Track Management:**
     * Create, rename, and get detailed information for MIDI and audio tracks.
     * Control track properties: volume, panning, mute, solo, and arm.
+    * Set a track's input type/channel and monitoring (In/Auto/Off) by the names Live shows.
+    * Address tracks by number, name, or return letter, with an `expect_name` guard so a write fails instead of hitting the wrong track.
+    * Change several tracks' mute/solo/arm/input/monitoring in one validated batch, with a dry run.
+    * Check what is armed and what would record before recording (`get_recording_status`), and list every track compactly (`list_tracks`).
     * Manage track grouping and folding states.
 
 * **MIDI Clip and Note Manipulation:**

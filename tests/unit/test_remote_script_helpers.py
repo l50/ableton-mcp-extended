@@ -174,17 +174,19 @@ class TestSetTrackMuteAndSolo:
         track = _NormalTrack("Drums")
         script = _make_script([track])
 
-        result = script._set_track_mute(0, True)
+        result = script._set_track_mute({"track_index": 0, "mute": True})
 
         assert track.mute is True
-        assert result == {"track_name": "Drums", "mute": True}
+        assert result == {"track": {"index": 0, "name": "Drums"},
+                          "mute": True, "solo": False,
+                          "muted_via_solo": False}
 
     def test_mute_can_be_cleared(self):
         track = _NormalTrack("Drums")
         track.mute = True
         script = _make_script([track])
 
-        result = script._set_track_mute(0, False)
+        result = script._set_track_mute({"track_index": 0, "mute": False})
 
         assert track.mute is False
         assert result["mute"] is False
@@ -193,19 +195,20 @@ class TestSetTrackMuteAndSolo:
         track = _NormalTrack("Bass")
         script = _make_script([track])
 
-        result = script._set_track_solo(0, True)
+        result = script._set_track_solo({"track_index": 0, "solo": True})
 
         assert track.solo is True
-        assert result == {"track_name": "Bass", "solo": True}
+        assert result == {"track": {"index": 0, "name": "Bass"},
+                          "solo": True, "unsoloed": []}
 
     def test_group_tracks_can_be_muted(self):
         group = _GroupTrack("Mix Bus")
         script = _make_script([group])
 
-        result = script._set_track_mute(0, True)
+        result = script._set_track_mute({"track_index": 0, "mute": True})
 
         assert group.mute is True
-        assert result["track_name"] == "Mix Bus"
+        assert result["track"]["name"] == "Mix Bus"
 
     def test_return_tracks_can_be_muted(self):
         normal = _NormalTrack("Drums")
@@ -213,16 +216,17 @@ class TestSetTrackMuteAndSolo:
         script = _make_script([normal])
         script._song.return_tracks = [send]
 
-        result = script._set_track_mute(1, True)
+        result = script._set_track_mute({"return_track_index": 0,
+                                         "mute": True})
 
         assert send.mute is True
-        assert result["track_name"] == "A-Reverb"
+        assert result["track"] == {"return_track": "A", "name": "A-Reverb"}
 
     def test_index_out_of_range_raises(self):
         script = _make_script([_NormalTrack("Drums")])
 
         with pytest.raises(IndexError):
-            script._set_track_mute(7, True)
+            script._set_track_mute({"track_index": 7, "mute": True})
 
 
 class TestSetTrackArmGuards:
@@ -230,10 +234,11 @@ class TestSetTrackArmGuards:
         track = _NormalTrack("Synth")
         script = _make_script([track])
 
-        result = script._set_track_arm(0, True)
+        result = script._set_track_arm({"track_index": 0, "arm": True})
 
         assert track.arm is True
-        assert result == {"track_name": "Synth", "arm": True}
+        assert result["track"] == {"index": 0, "name": "Synth"}
+        assert result["arm"] is True
 
     def test_group_track_is_refused_before_live_can_raise(self):
         """_GroupTrack.arm raises RuntimeError, as Live does.
@@ -244,7 +249,7 @@ class TestSetTrackArmGuards:
         script = _make_script([_GroupTrack("Mix Bus")])
 
         with pytest.raises(ValueError) as excinfo:
-            script._set_track_arm(0, True)
+            script._set_track_arm({"track_index": 0, "arm": True})
 
         assert "no Arm state" in str(excinfo.value)
 
@@ -252,10 +257,10 @@ class TestSetTrackArmGuards:
         script = _make_script([_NormalTrack("Drums")])
         script._song.return_tracks = [_NormalTrack("A-Reverb")]
 
-        with pytest.raises(IndexError) as excinfo:
-            script._set_track_arm(1, True)
+        with pytest.raises(ValueError) as excinfo:
+            script._set_track_arm({"return_track_index": 0, "arm": True})
 
-        assert "no Arm state" in str(excinfo.value)
+        assert "return tracks" in str(excinfo.value)
 
     def test_a_track_that_cannot_be_armed_is_refused(self):
         track = _NormalTrack("Odd")
@@ -263,7 +268,7 @@ class TestSetTrackArmGuards:
         script = _make_script([track])
 
         with pytest.raises(ValueError) as excinfo:
-            script._set_track_arm(0, True)
+            script._set_track_arm({"track_index": 0, "arm": True})
 
         assert "cannot be armed" in str(excinfo.value)
 
@@ -299,7 +304,8 @@ class TestMuteSoloArmAreActuallyReachable:
                                   {"track_index": 0, "mute": True})
 
         assert response["status"] == "success", response
-        assert response["result"] == {"track_name": "Drums", "mute": True}
+        assert response["result"]["track"] == {"index": 0, "name": "Drums"}
+        assert response["result"]["mute"] is True
         assert track.mute is True
 
     def test_set_track_solo_round_trips_through_the_dispatcher(self):
@@ -310,7 +316,7 @@ class TestMuteSoloArmAreActuallyReachable:
                                   {"track_index": 0, "solo": True})
 
         assert response["status"] == "success", response
-        assert response["result"] == {"track_name": "Bass", "solo": True}
+        assert response["result"]["solo"] is True
         assert track.solo is True
 
     def test_set_track_arm_round_trips_through_the_dispatcher(self):
@@ -321,7 +327,7 @@ class TestMuteSoloArmAreActuallyReachable:
                                   {"track_index": 0, "arm": True})
 
         assert response["status"] == "success", response
-        assert response["result"] == {"track_name": "Synth", "arm": True}
+        assert response["result"]["arm"] is True
         assert track.arm is True
 
     def test_arming_a_group_track_reports_an_error_not_a_success(self):

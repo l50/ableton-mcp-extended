@@ -130,6 +130,7 @@ class AbletonConnection:
             "delete_device", "navigate_preset",
             "set_track_volume", "set_track_panning",
             "set_track_mute", "set_track_solo", "set_track_arm",
+            "set_track_input", "set_track_monitoring", "set_tracks_state",
         ]
         
         try:
@@ -402,17 +403,33 @@ def get_session_info(ctx: Context) -> str:
         return f"Error getting session info: {str(e)}"
 
 @mcp.tool()
-def get_track_info(ctx: Context, track_index: int) -> str:
+def get_track_info(ctx: Context, track_index: int, include_clip_slots: bool = True) -> str:
     """
     Get detailed information about a specific track in Ableton.
 
+    Besides name, mixer state, clip slots and devices, the reply includes
+    input/output routing, monitoring, can_be_armed, implicit_arm, group and
+    fold state (is_foldable, fold_state, is_grouped, group_track with its
+    1-based track_index), is_visible, muted_via_solo, is_frozen, color,
+    arrangement_clip_count and take_lane_count (null where Live lacks it).
+
     Parameters:
     - track_index: Track number (1-based).
+    - include_clip_slots: False leaves out the session clip slots.
     """
     try:
         ableton = get_ableton_connection()
         ti = _to_zero_based(track_index, "track_index")
-        result = ableton.send_command("get_track_info", {"track_index": ti})
+        result = ableton.send_command("get_track_info", {
+            "track_index": ti,
+            "include_clip_slots": bool(include_clip_slots),
+        })
+        group = result.get("group_track") if isinstance(result, dict) else None
+        if isinstance(group, dict) and isinstance(group.get("index"), int):
+            result["group_track"] = {
+                "track_index": group["index"] + 1,
+                "name": group.get("name"),
+            }
         return json.dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Error getting track info from Ableton: {str(e)}")
@@ -551,79 +568,422 @@ def set_track_panning(ctx: Context, track_index: int, panning: float) -> str:
         return f"Error setting track panning: {str(e)}"
 
 
+# ── Track addressing for the recording-safety tools ──────────────
+#
+# These tools take a track by 1-based track_index, by track_name
+# (case-insensitive exact match) or, where returns make sense, by
+# return_track ("A", "B", ... or 1-based). Writes accept expect_name: if
+# the addressed track's name differs, the call fails and nothing changes.
+# Success is a compact JSON object with "ok": true and a "warnings" list;
+# failure is a string starting "Error <action>: ".
+
+_MONITORING_STATES = ("in", "auto", "off")
+_TRACK_STATE_FIELDS = ("mute", "solo", "arm", "input_type", "input_channel",
+                       "monitoring")
+
+
+def _parse_return_track(value: Any) -> int | None:
+    """Convert a return-track reference ("A", "b", "1", 1) to 0-based.
+
+    Returns None when *value* is empty.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        number = int(text)
+        if number >= 1:
+            return number - 1
+    elif len(text) == 1 and text.isalpha():
+        return ord(text.upper()) - ord("A")
+    raise ValueError(
+        f"return_track must be a letter (A, B, ...) or a 1-based number, "
+        f"got '{value}'"
+    )
+
+
+def _track_ref_params(
+    track_index: Any = 0,
+    track_name: str = "",
+    return_track: Any = "",
+    expect_name: str = "",
+) -> Dict[str, Any]:
+    """Build the Remote Script track reference (0-based) from tool args."""
+    params: Dict[str, Any] = {}
+    index = _optional_to_zero_based(int(track_index or 0), "track_index")
+    if index is not None:
+        params["track_index"] = index
+    if track_name:
+        params["track_name"] = str(track_name)
+    return_index = _parse_return_track(return_track)
+    if return_index is not None:
+        params["return_track_index"] = return_index
+    if len(params) != 1:
+        raise ValueError(
+            "give exactly one of track_index (1-based), track_name or "
+            "return_track"
+        )
+    if expect_name:
+        params["expect_name"] = str(expect_name)
+    return params
+
+
+def _one_based_track_indices(value: Any) -> Any:
+    """Return a copy of a Remote Script reply with every "index" made 1-based.
+
+    The recording-safety replies use the "index" key only for track indices.
+    """
+    if isinstance(value, dict):
+        converted = {}
+        for key, item in value.items():
+            if key == "index" and isinstance(item, int) and not isinstance(item, bool):
+                converted[key] = item + 1
+            else:
+                converted[key] = _one_based_track_indices(item)
+        return converted
+    if isinstance(value, list):
+        return [_one_based_track_indices(item) for item in value]
+    return value
+
+
+def _ok_json(result: Any) -> str:
+    """Compact JSON success reply: {"ok": true, ..., "warnings": [...]}."""
+    payload: Dict[str, Any] = {"ok": True}
+    payload.update(_one_based_track_indices(result or {}))
+    payload.setdefault("warnings", [])
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def _normalize_monitoring(state: Any) -> str:
+    value = str(state or "").strip().lower()
+    if value not in _MONITORING_STATES:
+        raise ValueError(
+            f"monitoring state must be one of in, auto, off (got '{state}')"
+        )
+    return value
+
+
 @mcp.tool()
-def set_track_mute(ctx: Context, track_index: int, mute: bool = True) -> str:
-    """Mute or unmute a track.
+def set_track_mute(
+    ctx: Context,
+    track_index: int = 0,
+    mute: bool = True,
+    track_name: str = "",
+    return_track: str = "",
+    expect_name: str = "",
+) -> str:
+    """Mute or unmute a track or return track.
 
     Parameters:
-    - track_index: Track number (1-based). Return tracks come after session tracks.
+    - track_index: Track number (1-based, groups included). 0 = use track_name or return_track.
     - mute: True to mute, False to unmute.
+    - track_name: Track name (case-insensitive exact match) instead of track_index.
+    - return_track: Return track letter ("A", "B", ...) or 1-based number.
+    - expect_name: If given, fail without changing anything unless the addressed track has this name.
+
+    Returns JSON: {ok, track, mute, solo, muted_via_solo, warnings}.
     """
     try:
+        params = _track_ref_params(track_index, track_name, return_track, expect_name)
+        params["mute"] = bool(mute)
         ableton = get_ableton_connection()
-        ti = _to_zero_based(track_index, "track_index")
-        result = ableton.send_command("set_track_mute", {
-            "track_index": ti,
-            "mute": bool(mute),
-        })
-        name = result.get("track_name", "?")
-        state = "muted" if result.get("mute", mute) else "unmuted"
-        return f"Track '{name}' is now {state}"
+        return _ok_json(ableton.send_command("set_track_mute", params))
     except Exception as e:
         logger.error(f"Error setting track mute: {str(e)}")
         return f"Error setting track mute: {str(e)}"
 
 
 @mcp.tool()
-def set_track_solo(ctx: Context, track_index: int, solo: bool = True) -> str:
-    """Solo or unsolo a track.
+def set_track_solo(
+    ctx: Context,
+    track_index: int = 0,
+    solo: bool = True,
+    exclusive: bool = False,
+    track_name: str = "",
+    return_track: str = "",
+    expect_name: str = "",
+) -> str:
+    """Solo or unsolo a track or return track.
 
-    Soloing is exclusive in Ableton by default: soloing one track implicitly
-    silences the others without changing their mute state.
+    Live's API bypasses exclusive solo, so soloing through it does not unsolo
+    other tracks. Pass exclusive=True to unsolo every other track first.
 
     Parameters:
-    - track_index: Track number (1-based). Return tracks come after session tracks.
+    - track_index: Track number (1-based, groups included). 0 = use track_name or return_track.
     - solo: True to solo, False to unsolo.
+    - exclusive: With solo=True, unsolo all other tracks and return tracks.
+    - track_name: Track name (case-insensitive exact match) instead of track_index.
+    - return_track: Return track letter ("A", "B", ...) or 1-based number.
+    - expect_name: If given, fail without changing anything unless the addressed track has this name.
+
+    Returns JSON: {ok, track, solo, unsoloed, warnings}.
     """
     try:
+        params = _track_ref_params(track_index, track_name, return_track, expect_name)
+        params["solo"] = bool(solo)
+        params["exclusive"] = bool(exclusive)
         ableton = get_ableton_connection()
-        ti = _to_zero_based(track_index, "track_index")
-        result = ableton.send_command("set_track_solo", {
-            "track_index": ti,
-            "solo": bool(solo),
-        })
-        name = result.get("track_name", "?")
-        state = "soloed" if result.get("solo", solo) else "unsoloed"
-        return f"Track '{name}' is now {state}"
+        return _ok_json(ableton.send_command("set_track_solo", params))
     except Exception as e:
         logger.error(f"Error setting track solo: {str(e)}")
         return f"Error setting track solo: {str(e)}"
 
 
 @mcp.tool()
-def set_track_arm(ctx: Context, track_index: int, arm: bool = True) -> str:
-    """Arm or unarm a track for recording.
+def set_track_arm(
+    ctx: Context,
+    track_index: int = 0,
+    arm: bool = True,
+    exclusive: bool = False,
+    track_name: str = "",
+    expect_name: str = "",
+) -> str:
+    """Arm or disarm a track for recording.
 
-    Only session tracks have an Arm state. Group, master and return tracks do
-    not, and asking for one returns a clear error rather than a Live exception.
+    Group, return and master tracks have no Arm state and are refused, as are
+    frozen tracks. Check get_recording_status before recording.
 
     Parameters:
-    - track_index: Session track number (1-based).
-    - arm: True to arm, False to unarm.
+    - track_index: Track number (1-based, groups included). 0 = use track_name.
+    - arm: True to arm, False to disarm.
+    - exclusive: With arm=True, disarm every other armed track in the same step.
+    - track_name: Track name (case-insensitive exact match) instead of track_index.
+    - expect_name: If given, fail without changing anything unless the addressed track has this name.
+
+    Returns JSON: {ok, track, arm, implicit_arm, input, monitoring, disarmed, warnings}.
+    Warnings flag an armed track with input "No Input", monitoring "In",
+    other tracks still armed, and implicit_arm (Live's auto-arm).
     """
     try:
+        params = _track_ref_params(track_index, track_name, "", expect_name)
+        params["arm"] = bool(arm)
+        params["exclusive"] = bool(exclusive)
         ableton = get_ableton_connection()
-        ti = _to_zero_based(track_index, "track_index")
-        result = ableton.send_command("set_track_arm", {
-            "track_index": ti,
-            "arm": bool(arm),
-        })
-        name = result.get("track_name", "?")
-        state = "armed" if result.get("arm", arm) else "unarmed"
-        return f"Track '{name}' is now {state}"
+        return _ok_json(ableton.send_command("set_track_arm", params))
     except Exception as e:
         logger.error(f"Error setting track arm: {str(e)}")
         return f"Error setting track arm: {str(e)}"
+
+
+@mcp.tool()
+def get_track_routing_options(
+    ctx: Context,
+    track_index: int = 0,
+    track_name: str = "",
+    return_track: str = "",
+) -> str:
+    """List a track's current input/output routing and the names Live offers.
+
+    Use the names returned here with set_track_input or set_tracks_state.
+    Group and return tracks have no input, so their "input" is null.
+
+    Parameters:
+    - track_index: Track number (1-based, groups included). 0 = use track_name or return_track.
+    - track_name: Track name (case-insensitive exact match) instead of track_index.
+    - return_track: Return track letter ("A", "B", ...) or 1-based number.
+
+    Returns JSON: {ok, track, input: {current: {type, channel}, types, channels}, output: {...}}.
+    """
+    try:
+        params = _track_ref_params(track_index, track_name, return_track)
+        ableton = get_ableton_connection()
+        return _ok_json(ableton.send_command("get_track_routing_options", params))
+    except Exception as e:
+        logger.error(f"Error getting track routing options: {str(e)}")
+        return f"Error getting track routing options: {str(e)}"
+
+
+@mcp.tool()
+def set_track_input(
+    ctx: Context,
+    input_type: str,
+    input_channel: str = "",
+    track_index: int = 0,
+    track_name: str = "",
+    expect_name: str = "",
+) -> str:
+    """Set a track's input type and channel by the names Live shows.
+
+    Names are matched case-insensitively against the options Live offers
+    (see get_track_routing_options), e.g. input_type="Ext. In" with
+    input_channel="4", or input_type="No Input" so a guide track cannot record.
+    If the channel is not offered, the input is left unchanged.
+
+    Parameters:
+    - input_type: Input type name, e.g. "Ext. In", "No Input", or another track's name.
+    - input_channel: Input channel name, e.g. "1", "1/2". Empty = Live's default for the type.
+    - track_index: Track number (1-based, groups included). 0 = use track_name.
+    - track_name: Track name (case-insensitive exact match) instead of track_index.
+    - expect_name: If given, fail without changing anything unless the addressed track has this name.
+
+    Returns JSON: {ok, track, input: {type, channel}, available_channels, arm, warnings}.
+    """
+    try:
+        if not str(input_type or "").strip():
+            raise ValueError("input_type is required")
+        params = _track_ref_params(track_index, track_name, "", expect_name)
+        params["input_type"] = str(input_type)
+        params["input_channel"] = str(input_channel or "")
+        ableton = get_ableton_connection()
+        return _ok_json(ableton.send_command("set_track_input", params))
+    except Exception as e:
+        logger.error(f"Error setting track input: {str(e)}")
+        return f"Error setting track input: {str(e)}"
+
+
+@mcp.tool()
+def set_track_monitoring(
+    ctx: Context,
+    state: str,
+    track_index: int = 0,
+    track_name: str = "",
+    expect_name: str = "",
+) -> str:
+    """Set a track's monitoring to In, Auto or Off.
+
+    Group, return, master and frozen tracks are refused.
+
+    Parameters:
+    - state: "in", "auto" or "off".
+    - track_index: Track number (1-based, groups included). 0 = use track_name.
+    - track_name: Track name (case-insensitive exact match) instead of track_index.
+    - expect_name: If given, fail without changing anything unless the addressed track has this name.
+
+    Returns JSON: {ok, track, monitoring, warnings}.
+    """
+    try:
+        value = _normalize_monitoring(state)
+        params = _track_ref_params(track_index, track_name, "", expect_name)
+        params["state"] = value
+        ableton = get_ableton_connection()
+        return _ok_json(ableton.send_command("set_track_monitoring", params))
+    except Exception as e:
+        logger.error(f"Error setting track monitoring: {str(e)}")
+        return f"Error setting track monitoring: {str(e)}"
+
+
+def _convert_track_change(change: Any) -> Dict[str, Any]:
+    """Convert one set_tracks_state entry to Remote Script params."""
+    if not isinstance(change, dict):
+        raise ValueError("each change must be an object")
+    allowed = {"track_index", "track_name", "return_track", "expect_name",
+               *_TRACK_STATE_FIELDS}
+    unknown = sorted(set(change) - allowed)
+    if unknown:
+        raise ValueError(f"unknown key(s): {', '.join(unknown)}")
+    params = _track_ref_params(
+        change.get("track_index") or 0,
+        change.get("track_name") or "",
+        change.get("return_track") or "",
+        change.get("expect_name") or "",
+    )
+    for field in _TRACK_STATE_FIELDS:
+        if change.get(field) is not None:
+            params[field] = change[field]
+    if "monitoring" in params:
+        params["monitoring"] = _normalize_monitoring(params["monitoring"])
+    return params
+
+
+@mcp.tool()
+def set_tracks_state(
+    ctx: Context,
+    changes: List[Dict[str, Any]],
+    dry_run: bool = False,
+) -> str:
+    """Change several tracks' mute/solo/arm/input/monitoring in one validated batch.
+
+    Every entry is checked before anything is written. Any problem rejects
+    the whole batch and lists every problem, so a batch is never half
+    applied; if Live rejects a write part-way, the earlier changes are
+    restored. Use dry_run=True to show which tracks would change first.
+
+    Parameters:
+    - changes: List of objects. Each names one track with track_index
+      (1-based), track_name or return_track, may add expect_name, and sets
+      any of: mute (bool), solo (bool), arm (bool), input_type (str),
+      input_channel (str), monitoring ("in"/"auto"/"off").
+      Example: [{"track_name": "Guide", "input_type": "No Input", "arm": false},
+                {"track_index": 3, "expect_name": "Gtr DI", "mute": true}]
+    - dry_run: True = validate and show the resolved targets without changing anything.
+
+    Returns JSON: {ok, dry_run, changes: [{track, before, after or requested}], warnings}.
+    """
+    try:
+        if not isinstance(changes, list) or not changes:
+            raise ValueError("changes must be a non-empty list")
+        converted, problems = [], []
+        for number, change in enumerate(changes, 1):
+            try:
+                converted.append(_convert_track_change(change))
+            except (ValueError, TypeError) as e:
+                problems.append(f"change {number}: {e}")
+        if problems:
+            raise ValueError(
+                "rejected the whole batch; nothing was changed. "
+                + "; ".join(problems)
+            )
+        ableton = get_ableton_connection()
+        result = ableton.send_command(
+            "set_tracks_state", {"changes": converted, "dry_run": bool(dry_run)}
+        )
+        return _ok_json(result)
+    except Exception as e:
+        logger.error(f"Error setting tracks state: {str(e)}")
+        return f"Error setting tracks state: {str(e)}"
+
+
+@mcp.tool()
+def get_recording_status(ctx: Context) -> str:
+    """Check what would record before pressing record.
+
+    Reports the transport flags (playing, record mode, session record,
+    overdub, punch in/out, metronome, count-in, loop, exclusive arm/solo),
+    every armed track with its input and monitoring, and warnings: armed
+    tracks with input "No Input", armed tracks sharing an input, implicit_arm
+    (Live's auto-arm), monitoring "In" on unarmed tracks, and record mode on
+    while stopped.
+
+    Returns JSON: {ok, transport, armed_tracks: [{index, name, arm, implicit_arm, input, monitoring}], warnings}.
+    """
+    try:
+        ableton = get_ableton_connection()
+        return _ok_json(ableton.send_command("get_recording_status"))
+    except Exception as e:
+        logger.error(f"Error getting recording status: {str(e)}")
+        return f"Error getting recording status: {str(e)}"
+
+
+@mcp.tool()
+def list_tracks(
+    ctx: Context,
+    include_returns: bool = True,
+    include_master: bool = True,
+) -> str:
+    """List every track in one compact pass.
+
+    Each row: {index (1-based; null for returns/master), name, kind
+    (midi/audio/group/return/master), group, folded, visible, mute, solo,
+    muted_via_solo, arm, implicit_arm, can_be_armed, input, monitoring,
+    output, device_count, arrangement_clip_count}. Return rows also carry
+    return_track ("A", "B", ...).
+
+    Parameters:
+    - include_returns: Include return tracks.
+    - include_master: Include the master track.
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("list_tracks", {
+            "include_returns": bool(include_returns),
+            "include_master": bool(include_master),
+        })
+        return _ok_json(result)
+    except Exception as e:
+        logger.error(f"Error listing tracks: {str(e)}")
+        return f"Error listing tracks: {str(e)}"
 
 
 @mcp.tool()
