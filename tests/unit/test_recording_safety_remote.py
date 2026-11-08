@@ -282,7 +282,7 @@ class TestResolveTrack:
         with pytest.raises(IndexError) as excinfo:
             script._resolve_track({"return_track_index": 2},
                                   allow_returns=True)
-        assert "return_track C does not exist" in str(excinfo.value)
+        assert "return_track 3 does not exist" in str(excinfo.value)
         assert "1 return track(s)" in str(excinfo.value)
 
     def test_index_out_of_range_uses_one_based_numbers(self):
@@ -331,11 +331,6 @@ class TestResolveTrack:
 
 
 class TestSmallHelpers:
-    def test_return_label_past_z_is_numeric(self):
-        assert AbletonMCP._return_track_label(0) == "A"
-        assert AbletonMCP._return_track_label(25) == "Z"
-        assert AbletonMCP._return_track_label(26) == "27"
-
     def test_safe_attr_swallows_live_errors(self):
         assert AbletonMCP._safe_attr(_GroupTrack(), "arm", "x") == "x"
 

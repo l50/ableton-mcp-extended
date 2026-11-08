@@ -826,9 +826,7 @@ class AbletonMCP(ControlSurface):
 
     @staticmethod
     def _return_track_label(index):
-        if 0 <= index < 26:
-            return chr(ord("A") + index)
-        return str(index + 1)
+        return chr(ord("A") + index)
 
     @staticmethod
     def _routing_name(routing):
@@ -917,8 +915,7 @@ class AbletonMCP(ControlSurface):
             if return_index < 0 or return_index >= len(returns):
                 raise IndexError(
                     "return_track {0} does not exist: the Set has {1} return "
-                    "track(s)".format(self._return_track_label(return_index),
-                                      len(returns)))
+                    "track(s)".format(return_index + 1, len(returns)))
             track = returns[return_index]
         else:
             wanted = track_name.lower()
