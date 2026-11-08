@@ -15,6 +15,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Importing MCP_Server runs its __init__, which imports server.py and with it
+# mcp.server.fastmcp. Stub mcp like the other server tests so this file also
+# runs on its own, not only after another module has installed the stub.
+if "MCP_Server.server" not in sys.modules:
+    _mock_fastmcp = MagicMock()
+    _mock_fastmcp.FastMCP.return_value.tool.return_value = lambda fn: fn
+    sys.modules["mcp"] = MagicMock()
+    sys.modules["mcp.server"] = MagicMock()
+    sys.modules["mcp.server.fastmcp"] = _mock_fastmcp
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from MCP_Server import supervisor as sup  # noqa: E402
