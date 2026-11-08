@@ -40,6 +40,12 @@ from MCP_Server.server import (  # noqa: E402
     set_track_solo,
     set_tracks_state,
 )
+from tests.unit.test_recording_safety_remote import (  # noqa: E402
+    AUTO,
+    _Track as _RemoteTrack,
+    _dispatch as _dispatch_remote,
+    _make_script as _make_remote_script,
+)
 
 
 @pytest.fixture
@@ -239,7 +245,8 @@ class TestSetTracksState:
         assert command == "set_tracks_state"
         assert params == {"dry_run": False, "changes": [
             {"track_name": "Guide", "input_type": "No Input", "arm": False},
-            {"track_index": 2, "expect_name": "Gtr", "monitoring": "auto"},
+            {"track_index": 2, "expect_name": "Gtr", "monitoring": "AUTO",
+             "mute": None},
             {"return_track_index": 1, "solo": True},
         ]}
 
@@ -254,20 +261,52 @@ class TestSetTracksState:
         result = set_tracks_state(MagicMock(), [
             {"track_index": 1, "mute": True},
             "nope",
-            {"track_index": 1, "volume": 1},
             {"track_index": 1, "track_name": "Gtr", "mute": True},
-            {"track_name": "Gtr", "monitoring": "loud"},
             {"track_index": "x", "mute": True},
+            {"return_track": "AB", "mute": True},
         ])
         assert result.startswith("Error setting tracks state: rejected the "
                                  "whole batch; nothing was changed.")
         assert "change 2: each change must be an object" in result
-        assert "change 3: unknown key(s): volume" in result
-        assert "change 4: give exactly one of" in result
-        assert "change 5: monitoring state must be one of" in result
-        assert "change 6:" in result
+        assert "change 3: give exactly one of" in result
+        assert "change 4:" in result
+        assert "change 5: return_track must be a letter" in result
         assert "change 1" not in result
         ableton.send_command.assert_not_called()
+
+    def test_state_values_and_unknown_keys_reach_the_remote_script(
+            self, ableton):
+        ableton.send_command.return_value = {"dry_run": False, "changes": []}
+        set_tracks_state(MagicMock(), [
+            {"track_index": 1, "volume": 1},
+            {"track_name": "Gtr", "monitoring": "loud", "arm": "yes"},
+        ])
+        assert _sent(ableton)[1]["changes"] == [
+            {"track_index": 0, "volume": 1},
+            {"track_name": "Gtr", "monitoring": "loud", "arm": "yes"},
+        ]
+
+    def test_remote_script_lists_every_problem_together(self, ableton):
+        gtr = _RemoteTrack("Gtr")
+        script = _make_remote_script([gtr])
+
+        def send_command(command, params=None):
+            response = _dispatch_remote(script, command, params)
+            if response["status"] == "error":
+                raise Exception(response["message"])
+            return response["result"]
+
+        ableton.send_command.side_effect = send_command
+        result = set_tracks_state(MagicMock(), [
+            {"track_index": 1, "monitoring": "inn"},
+            {"track_name": "Gutiar", "arm": True},
+        ])
+        assert result.startswith("Error setting tracks state: Rejected the "
+                                 "whole batch; nothing was changed.")
+        assert ("change 1: monitoring must be one of in, auto, off "
+                "(got 'inn')") in result
+        assert "change 2: No track named 'Gutiar'" in result
+        assert gtr.current_monitoring_state == AUTO and gtr.arm is False
 
     @pytest.mark.parametrize("changes", [[], None])
     def test_empty_batch(self, ableton, changes):

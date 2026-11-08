@@ -578,8 +578,7 @@ def set_track_panning(ctx: Context, track_index: int, panning: float) -> str:
 # failure is a string starting "Error <action>: ".
 
 _MONITORING_STATES = ("in", "auto", "off")
-_TRACK_STATE_FIELDS = ("mute", "solo", "arm", "input_type", "input_channel",
-                       "monitoring")
+_TRACK_REF_FIELDS = ("track_index", "track_name", "return_track", "expect_name")
 
 
 def _parse_return_track(value: Any) -> int | None:
@@ -868,22 +867,14 @@ def _convert_track_change(change: Any) -> Dict[str, Any]:
     """Convert one set_tracks_state entry to Remote Script params."""
     if not isinstance(change, dict):
         raise ValueError("each change must be an object")
-    allowed = {"track_index", "track_name", "return_track", "expect_name",
-               *_TRACK_STATE_FIELDS}
-    unknown = sorted(set(change) - allowed)
-    if unknown:
-        raise ValueError(f"unknown key(s): {', '.join(unknown)}")
-    params = _track_ref_params(
+    params = {key: value for key, value in change.items()
+              if key not in _TRACK_REF_FIELDS}
+    params.update(_track_ref_params(
         change.get("track_index") or 0,
         change.get("track_name") or "",
         change.get("return_track") or "",
         change.get("expect_name") or "",
-    )
-    for field in _TRACK_STATE_FIELDS:
-        if change.get(field) is not None:
-            params[field] = change[field]
-    if "monitoring" in params:
-        params["monitoring"] = _normalize_monitoring(params["monitoring"])
+    ))
     return params
 
 
