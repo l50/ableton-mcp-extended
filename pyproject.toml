@@ -40,7 +40,6 @@ xy_controller = [
 test = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
-    "mcp[cli]>=1.3,<2",
 ]
 
 [tool.pytest.ini_options]
