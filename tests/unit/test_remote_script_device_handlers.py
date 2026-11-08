@@ -3,7 +3,7 @@ run against stub Live Device/Chain/DrumPad/Browser objects."""
 import os
 import sys
 import types
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import pytest
 
@@ -25,6 +25,10 @@ sys.modules.setdefault("_Framework.ControlSurface", _cs_module)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from AbletonMCP_Remote_Script import AbletonMCP  # noqa: E402
+
+AUDIO_EFFECT_TYPE_BUG = (
+    "Bug: _get_device_type only matches the literal 'audio_effect' in class_name, "
+    "so ordinary audio effects such as Chorus and EQ Eight (Eq8) are typed 'unknown'")
 
 # ── stubs ────────────────────────────────────────────────────────────
 
@@ -48,10 +52,12 @@ class Param:
 class Device:
     def __init__(self, name="Device", class_name="AudioEffectGroupDevice",
                  class_display_name="Audio Effect Rack", parameters=None, chains=None,
-                 drum_pads=None, presets=None, selected_preset_index=0, is_active=True):
+                 drum_pads=None, presets=None, selected_preset_index=0, is_active=True,
+                 device_type=0):
         self.name = name
         self.class_name = class_name
         self.class_display_name = class_display_name
+        self.type = device_type
         self.parameters = list(parameters if parameters is not None else [Param("Device On", 1.0)])
         self.chains = list(chains or [])
         self.can_have_chains = chains is not None
@@ -179,6 +185,14 @@ class TestDeviceDescriptors:
     ])
     def test_device_type(self, device, expected):
         assert make_script()._get_device_type(device) == expected
+
+    @pytest.mark.xfail(strict=False, reason=AUDIO_EFFECT_TYPE_BUG)
+    @pytest.mark.parametrize("device", [
+        Device("Chorus", "AudioEffectChorus", "Chorus", device_type=2),
+        Device("EQ Eight", "Eq8", "EQ Eight", device_type=2),
+    ], ids=["chorus", "eq8"])
+    def test_ordinary_audio_effects_are_audio_effect(self, device):
+        assert make_script()._get_device_type(device) == "audio_effect"
 
     def test_device_info(self):
         info = make_script()._get_device_info(synth())
@@ -308,7 +322,7 @@ class TestChainInfo:
     def _rack(self):
         return rack([
             Chain("Keys", [synth(), Device("Chorus", "AudioEffectChorus", "Chorus",
-                                           is_active=False)], mute=True),
+                                           is_active=False, device_type=2)], mute=True),
             Chain("Empty", [], solo=True),
         ])
 
@@ -319,15 +333,21 @@ class TestChainInfo:
         assert result["chains"][0] == {
             "index": 0, "name": "Keys", "mute": True, "solo": False, "device_count": 2,
             "devices": [{"index": 0, "name": "Wavetable", "type": "instrument"},
-                        {"index": 1, "name": "Chorus", "type": "unknown"}]}
+                        {"index": 1, "name": "Chorus", "type": ANY}]}
         assert result["chains"][1]["devices"] == []
 
     def test_chain_detail(self):
         result = make_script([Track("T", [self._rack()])])._get_chain_info(0, 0, 0)
         assert result["chain_name"] == "Keys"
         assert result["devices"][1] == {"index": 1, "name": "Chorus",
-                                        "class_name": "AudioEffectChorus", "type": "unknown",
+                                        "class_name": "AudioEffectChorus", "type": ANY,
                                         "is_active": False, "parameter_count": 1}
+
+    @pytest.mark.xfail(strict=False, reason=AUDIO_EFFECT_TYPE_BUG)
+    def test_chain_types_audio_effects(self):
+        script = make_script([Track("T", [self._rack()])])
+        assert script._get_chain_info(0, 0)["chains"][0]["devices"][1]["type"] == "audio_effect"
+        assert script._get_chain_info(0, 0, 0)["devices"][1]["type"] == "audio_effect"
 
     @pytest.mark.parametrize("device,chain_index,error,match", [
         (synth(), None, ValueError, "is not a rack and has no chains"),

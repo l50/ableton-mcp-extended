@@ -7,6 +7,7 @@ the exact wire payload and the text returned to the MCP client.
 """
 import json
 import os
+import re
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -139,10 +140,10 @@ SIMPLE_CASES = [
      {"track_index": 1, "clip_index": 2, "action": "create", "parameter_name": "panning"},
      ["Automation create: panning on clip 3, track 2"]),
     ("manage_automation_clear_all", server.manage_clip_automation,
-     {"track_index": 1, "clip_index": 0, "action": "clear_all"},
+     {"track_index": 1, "clip_index": 1, "action": "clear_all"},
      {}, "manage_clip_automation",
      {"track_index": 0, "clip_index": 0, "action": "clear_all", "parameter_name": "volume"},
-     ["Cleared all automation on clip 0, track 1"]),
+     ["Cleared all automation on clip 1, track 1"]),
     ("navigate_preset_current", server.navigate_device_preset,
      {"track_index": 1, "direction": "current"},
      {"navigate_preset": {"device_name": "Operator", "preset_name": "Bell",
@@ -170,6 +171,19 @@ def test_simple_tool(tool, kwargs, replies, command, params, expected):
     assert fake.calls == [(command, params)]
     for text in expected:
         assert text in out
+
+
+@pytest.mark.xfail(strict=False, reason=(
+    "Bug: manage_clip_automation drops clip_name and sends clip_index 0, so it "
+    "changes the track's first arrangement clip instead of the named one "
+    "(fixed by PR A)"))
+def test_manage_clip_automation_targets_named_clip():
+    out, fake = run_tool(server.manage_clip_automation, track_index=1, clip_index=0,
+                         clip_name="Chorus", action="clear_all")
+    [params] = fake.sent("manage_clip_automation")
+    assert params["clip_name"] == "Chorus"
+    assert params.get("clip_index") != 0
+    assert out == "Cleared all automation on clip 'Chorus', track 1"
 
 
 # ── every tool reports connection failures as text ───────────────────
@@ -266,7 +280,7 @@ class TestTrackVolume:
         ({"volume": 0.0, "panning": -0.5, "track_name": "Pad"},
          ["≈ -inf dB", "Panning: -0.5000 (0.50 L)"]),
         ({"volume": 1.0, "panning": 0.25, "track_name": "Lead"},
-         ["≈ +1.4 dB", "(0.25 R)"]),
+         ["Volume: 1.0000", "(0.25 R)"]),
     ])
     def test_get_track_volume(self, reply, expected):
         out, fake = run_tool(server.get_track_volume, {"get_track_volume": reply}, track_index=4)
@@ -277,13 +291,25 @@ class TestTrackVolume:
     @pytest.mark.parametrize("volume,reply,expected", [
         (0.85, {"track_name": "Drums", "volume": 0.85}, "Set 'Drums' fader to 0.8500 (≈ +0.0 dB)"),
         (0.0, {"track_name": "Drums", "volume": 0.0}, "Set 'Drums' fader to 0.0000 (≈ -inf dB)"),
-        (0.5, {}, "Set '?' fader to 0.5000 (≈ -4.6 dB)"),
+        (0.85, {}, "Set '?' fader to 0.8500 (≈ +0.0 dB)"),
     ])
     def test_set_track_volume(self, volume, reply, expected):
         out, fake = run_tool(server.set_track_volume, {"set_track_volume": reply},
                              track_index=2, volume=volume)
         assert fake.calls == [("set_track_volume", {"track_index": 1, "volume": volume})]
         assert out == expected
+
+    @pytest.mark.xfail(strict=False, reason=(
+        "Bug: the dB readout uses 20*log10(volume/0.85) instead of Live's fader "
+        "mapping, where 0.85 is 0 dB and 1.0 is about +6 dB"))
+    @pytest.mark.parametrize("tool,replies,kwargs", [
+        (server.get_track_volume, {"get_track_volume": {"volume": 1.0, "panning": 0.0}}, {}),
+        (server.set_track_volume, {"set_track_volume": {"volume": 1.0}}, {"volume": 1.0}),
+    ], ids=["get", "set"])
+    def test_full_fader_reads_about_plus_6_db(self, tool, replies, kwargs):
+        out, _ = run_tool(tool, replies, track_index=1, **kwargs)
+        db = float(re.search(r"≈ ([+-]\d+\.\d) dB", out).group(1))
+        assert db == pytest.approx(6.0, abs=0.1)
 
     @pytest.mark.parametrize("panning,expected", [
         (0.0, "Set 'Bass' panning to 0.0000 (center)"),

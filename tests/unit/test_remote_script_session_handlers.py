@@ -3,7 +3,7 @@ cue-point handlers, run against stub Live Song/Track/Clip objects."""
 import os
 import sys
 import types
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import pytest
 
@@ -81,10 +81,11 @@ class Slot:
 
 class Device:
     def __init__(self, name="EQ Eight", class_name="Eq8", class_display_name="EQ Eight",
-                 parameters=()):
+                 parameters=(), device_type=2):
         self.name = name
         self.class_name = class_name
         self.class_display_name = class_display_name
+        self.type = device_type
         self.can_have_chains = False
         self.can_have_drum_pads = False
         self.parameters = list(parameters)
@@ -249,7 +250,14 @@ class TestSessionAndTracks:
             {"index": 1, "has_clip": False, "clip": None},
         ]
         assert info["devices"] == [{"index": 0, "name": "EQ Eight", "class_name": "Eq8",
-                                    "type": "unknown"}]
+                                    "type": ANY}]
+
+    @pytest.mark.xfail(strict=False, reason=(
+        "Bug: _get_device_type only matches the literal 'audio_effect' in class_name, "
+        "so ordinary audio effects such as EQ Eight (Eq8) are typed 'unknown'"))
+    def test_track_info_types_audio_effects(self):
+        info = make_script(Song([Track("Keys", devices=[Device()])]))._get_track_info(0)
+        assert info["devices"][0]["type"] == "audio_effect"
 
     @pytest.mark.parametrize("index", [-1, 1])
     def test_track_info_out_of_range(self, index):
