@@ -173,10 +173,6 @@ def test_simple_tool(tool, kwargs, replies, command, params, expected):
         assert text in out
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "Bug: manage_clip_automation drops clip_name and sends clip_index 0, so it "
-    "changes the track's first arrangement clip instead of the named one "
-    "(fixed by PR A)"))
 def test_manage_clip_automation_targets_named_clip():
     out, fake = run_tool(server.manage_clip_automation, track_index=1, clip_index=0,
                          clip_name="Chorus", action="clear_all")
@@ -711,12 +707,13 @@ class TestArrangementTools:
     def test_set_arrangement_clip_property_sends_one_command_per_property(self):
         out, fake = run_tool(server.set_arrangement_clip_property, {},
                              track_index=2, clip_index=3, name="Hook", muted=False, gain=0.5)
+        # "name" is sent last so a rename cannot break name-based lookup.
         assert fake.sent("set_arrangement_clip_property") == [
-            {"track_index": 1, "clip_index": 2, "property": "name", "value": "Hook"},
             {"track_index": 1, "clip_index": 2, "property": "muted", "value": False},
             {"track_index": 1, "clip_index": 2, "property": "gain", "value": 0.5},
+            {"track_index": 1, "clip_index": 2, "property": "name", "value": "Hook"},
         ]
-        assert out == "Updated clip 3 on track 2: name=Hook, muted=False, gain=0.5"
+        assert out == "Updated clip 3 on track 2: muted=False, gain=0.5, name=Hook"
 
     def test_set_arrangement_clip_property_nothing_to_change(self):
         out, fake = run_tool(server.set_arrangement_clip_property, {}, track_index=1)

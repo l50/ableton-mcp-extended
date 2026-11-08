@@ -515,7 +515,7 @@ class TestArrangementClips:
         clip = Clip()
         script = make_script(Song([Track(arrangement_clips=[clip])]))
         assert script._set_arrangement_clip_property(0, 0, "muted", True) == \
-            {"property": "muted", "value": True}
+            {"clip_name": "", "property": "muted", "value": True}
         assert clip.muted is True
 
     def test_set_arrangement_clip_property_rejects_unknown(self):
@@ -583,7 +583,8 @@ class TestClipAutomation:
 
     def test_clear_all(self):
         script, _, clip = self._setup()
-        assert script._manage_clip_automation(0, 0, "clear_all") == {"action": "clear_all", "done": True}
+        assert script._manage_clip_automation(0, 0, "clear_all") == \
+            {"action": "clear_all", "clip_name": "Lead", "done": True}
         clip.clear_all_envelopes.assert_called_once()
 
     @pytest.mark.parametrize("name,expected", [
@@ -594,13 +595,15 @@ class TestClipAutomation:
     def test_create_finds_mixer_send_and_device_params(self, name, expected):
         script, _, clip = self._setup()
         result = script._manage_clip_automation(0, 0, "create", name)
-        assert result == {"action": "create", "parameter": expected, "done": True}
+        assert result == {"action": "create", "parameter": expected, "clip_name": "Lead",
+                          "done": True}
         assert clip.create_automation_envelope.call_args[0][0].name == expected
 
     def test_clear_single_envelope(self):
         script, _, clip = self._setup()
         result = script._manage_clip_automation(0, 0, "clear", "Track Panning")
-        assert result == {"action": "clear", "parameter": "Track Panning", "done": True}
+        assert result == {"action": "clear", "parameter": "Track Panning",
+                          "clip_name": "Lead", "done": True}
         assert clip.clear_envelope.call_args[0][0].name == "Track Panning"
 
     def test_unknown_parameter(self):
