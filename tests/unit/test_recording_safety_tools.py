@@ -6,9 +6,8 @@ running Live instance.
 """
 import json
 import os
-import re
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -370,7 +369,7 @@ class TestReads:
 
 
 class TestCommandRegistration:
-    """Each new write command is in all three lists; reads are not gated."""
+    """The connection treats each new write as modifying; reads are not."""
 
     WRITES = ["set_track_mute", "set_track_solo", "set_track_arm",
               "set_track_input", "set_track_monitoring", "set_tracks_state"]
@@ -378,31 +377,28 @@ class TestCommandRegistration:
              "list_tracks"]
 
     @staticmethod
-    def _source(*parts):
-        with open(os.path.join(_ROOT, *parts)) as f:
-            return f.read()
+    def _send(command):
+        conn = server.AbletonConnection(host="localhost", port=0)
+        conn.sock = MagicMock()
+        conn.receive_full_response = MagicMock(
+            return_value=b'{"status": "success", "result": {"done": true}}')
+        with patch("time.sleep") as sleep:
+            result = conn.send_command(command, {})
+        return conn.sock, sleep, result
 
-    def test_writes_are_registered_everywhere(self):
-        rs = self._source("AbletonMCP_Remote_Script", "__init__.py")
-        mcp_src = self._source("MCP_Server", "server.py")
-        gate = re.search(r'elif command_type in \[(.*?)\]:', rs, re.S).group(1)
-        modifying = re.search(r'is_modifying_command = command_type in \[(.*?)\]',
-                              mcp_src, re.S).group(1)
-        for name in self.WRITES:
-            assert '"{0}"'.format(name) in gate, name
-            assert 'command_type == "{0}"'.format(name) in rs, name
-            assert '"{0}"'.format(name) in modifying, name
+    @pytest.mark.parametrize("command", WRITES)
+    def test_writes_get_the_write_timeout_and_settle_delays(self, command):
+        sock, sleep, result = self._send(command)
+        assert result == {"done": True}
+        sock.settimeout.assert_called_once_with(15.0)
+        assert sleep.call_args_list == [call(0.1), call(0.1)]
 
-    def test_reads_are_not_gated(self):
-        rs = self._source("AbletonMCP_Remote_Script", "__init__.py")
-        mcp_src = self._source("MCP_Server", "server.py")
-        gate = re.search(r'elif command_type in \[(.*?)\]:', rs, re.S).group(1)
-        modifying = re.search(r'is_modifying_command = command_type in \[(.*?)\]',
-                              mcp_src, re.S).group(1)
-        for name in self.READS:
-            assert '"{0}"'.format(name) not in gate, name
-            assert 'command_type == "{0}"'.format(name) in rs, name
-            assert '"{0}"'.format(name) not in modifying, name
+    @pytest.mark.parametrize("command", READS)
+    def test_reads_get_the_read_timeout_without_delays(self, command):
+        sock, sleep, result = self._send(command)
+        assert result == {"done": True}
+        sock.settimeout.assert_called_once_with(10.0)
+        sleep.assert_not_called()
 
     def test_server_module_exposes_every_tool(self):
         for name in self.WRITES + self.READS:

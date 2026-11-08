@@ -561,10 +561,22 @@ class TestSetTrackInput:
             script._set_track_input({"track_index": 0,
                                      "input_type": "Resampling",
                                      "input_channel": "9"})
-        assert "left unchanged" in str(excinfo.value)
-        assert "'Post FX'" in str(excinfo.value)
+        message = str(excinfo.value)
+        assert "left unchanged" in message
+        assert "'Post FX'" in message
+        assert ("Set input_type on its own first, then call again to change "
+                "only input_channel") in message
+        assert "repeat the call" not in message
         assert track.input_routing_type.display_name == "Ext. In"
         assert track.input_routing_channel.display_name == "2"
+
+        script._set_track_input({"track_index": 0,
+                                 "input_type": "Resampling"})
+        script._set_track_input({"track_index": 0,
+                                 "input_type": "Resampling",
+                                 "input_channel": "post fx"})
+        assert track.input_routing_type.display_name == "Resampling"
+        assert track.input_routing_channel.display_name == "Post FX"
 
     def test_unknown_channel_from_no_input_restores_without_channel(self):
         track = _Track("Gtr", input_type="No Input", input_channel=None)
@@ -583,6 +595,13 @@ class TestSetTrackInput:
                                      "input_type": "Ext. In",
                                      "input_channel": "9"})
         assert "left unchanged" not in str(excinfo.value)
+        assert track.input_routing_channel.display_name == "2"
+
+    def test_numeric_channel_matches_its_name(self):
+        track = _Track("Gtr", input_channel="1")
+        script = _make_script([track])
+        script._set_track_input({"track_index": 0, "input_type": "Ext. In",
+                                 "input_channel": 2})
         assert track.input_routing_channel.display_name == "2"
 
     def test_input_type_is_required(self):
@@ -638,6 +657,12 @@ class TestSetTrackMonitoring:
         assert track.current_monitoring_state == value
         assert result == {"track": {"index": 0, "name": "Gtr"},
                           "monitoring": state.lower()}
+
+    def test_padded_state_is_accepted(self):
+        track = _Track("Gtr")
+        script = _make_script([track])
+        script._set_track_monitoring({"track_index": 0, "state": " Off "})
+        assert track.current_monitoring_state == OFF
 
     def test_invalid_state(self):
         script = _make_script([_Track("Gtr")])
@@ -762,6 +787,44 @@ class TestSetTracksState:
         assert "No input type named 'USB'" in message
         assert "change 1" not in message.replace("by change 1", "")
         assert bass.mute is False and guide.arm is True
+
+    def test_every_problem_in_one_entry_is_listed(self):
+        guide, gtr, bass, ret, script = self._set()
+        with pytest.raises(ValueError) as excinfo:
+            script._set_tracks_state({"changes": [
+                {"track_name": "Gutiar", "monitoring": "inn", "arm": "yes"},
+                {"track_index": 2, "volume": 1, "monitoring": "inn"},
+                {"track_index": 0, "expect_name": "Gtr", "mute": 1,
+                 "bogus": True},
+            ]})
+        message = str(excinfo.value)
+        assert ("change 1: arm must be true or false; monitoring must be one "
+                "of in, auto, off (got 'inn'); No track named 'Gutiar'"
+                in message)
+        assert ("change 2: unknown key(s): volume; monitoring must be one of "
+                "in, auto, off (got 'inn')" in message)
+        assert ("change 3: unknown key(s): bogus; mute must be true or false; "
+                "expect_name mismatch" in message)
+        assert bass.mute is False
+
+    def test_numbers_and_padded_monitoring_are_normalized(self):
+        guide, gtr, bass, ret, script = self._set()
+        change = {"track_index": 2, "input_type": "Ext. In",
+                  "input_channel": 2, "monitoring": " In "}
+        preview = script._set_tracks_state({"dry_run": True,
+                                            "changes": [dict(change)]})
+        assert preview["changes"][0]["requested"] == {
+            "input_type": "Ext. In", "input_channel": "2", "monitoring": "in"}
+        script._set_tracks_state({"changes": [dict(change)]})
+        assert bass.input_routing_channel.display_name == "2"
+        assert bass.current_monitoring_state == IN
+
+    def test_numeric_channel_after_a_type_change(self):
+        guide, gtr, bass, ret, script = self._set()
+        script._set_tracks_state({"changes": [
+            {"track_index": 1, "input_type": "Ext. In", "input_channel": 2}]})
+        assert gtr.input_routing_type.display_name == "Ext. In"
+        assert gtr.input_routing_channel.display_name == "2"
 
     def test_validation_rules_per_field(self):
         frozen = _Track("Frozen")
@@ -1052,3 +1115,174 @@ class TestNewCommandsAreReachable:
         response = _dispatch(script, command, params)
         assert response["status"] == "error"
         assert "No track named 'nope'" in response["message"]
+
+
+# ── main-thread gate for the new commands ───────────────────────────
+
+
+class TestMainThreadGate:
+    WRITES = {
+        "set_track_mute": {"track_index": 0, "mute": True},
+        "set_track_solo": {"track_index": 0, "solo": True},
+        "set_track_arm": {"track_index": 0, "arm": True},
+        "set_track_input": {"track_index": 0, "input_type": "Ext. In",
+                            "input_channel": "2"},
+        "set_track_monitoring": {"track_index": 0, "state": "off"},
+        "set_tracks_state": {"changes": [{"track_index": 0, "mute": True}]},
+    }
+    READS = {
+        "get_track_routing_options": {"track_index": 0},
+        "get_recording_status": {},
+        "list_tracks": {},
+    }
+
+    @staticmethod
+    def _run(command, params):
+        script = _make_script([_Track("Gtr")])
+        script.schedule_message = MagicMock(
+            side_effect=lambda delay, task: task())
+        response = script._process_command({"type": command,
+                                            "params": params})
+        return script, response
+
+    @pytest.mark.parametrize("command", sorted(WRITES))
+    def test_writes_run_as_a_main_thread_task(self, command):
+        script, response = self._run(command, self.WRITES[command])
+        assert response["status"] == "success", response
+        assert response["result"] is not None
+        script.schedule_message.assert_called_once()
+
+    @pytest.mark.parametrize("command", sorted(READS))
+    def test_reads_answer_directly(self, command):
+        script, response = self._run(command, self.READS[command])
+        assert response["status"] == "success", response
+        assert response["result"]
+        script.schedule_message.assert_not_called()
+
+
+# ── Live hands out a new wrapper object on every read ───────────────
+
+
+def _unwrap(obj):
+    if isinstance(obj, _Wrapper):
+        return object.__getattribute__(obj, "_target")
+    return obj
+
+
+class _Wrapper:
+    """A fresh Python object per read that compares equal to the same track."""
+
+    def __init__(self, target):
+        object.__setattr__(self, "_target", target)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_target"), name)
+
+    def __setattr__(self, name, value):
+        setattr(object.__getattribute__(self, "_target"), name, value)
+
+    def __eq__(self, other):
+        return _unwrap(self) is _unwrap(other)
+
+    def __ne__(self, other):
+        return not self == other
+
+
+class _FreshSong(_Song):
+    @property
+    def tracks(self):
+        return [_Wrapper(t) for t in self._tracks]
+
+    @tracks.setter
+    def tracks(self, value):
+        self._tracks = value
+
+    @property
+    def return_tracks(self):
+        return [_Wrapper(t) for t in self._returns]
+
+    @return_tracks.setter
+    def return_tracks(self, value):
+        self._returns = value
+
+
+class TestFreshTrackWrappers:
+    def _script(self, tracks, returns=()):
+        script = _make_script()
+        script._song = _FreshSong(tracks, returns)
+        return script
+
+    def test_wrappers_are_new_objects_each_read(self):
+        script = self._script([_Track("Gtr")])
+        assert script._song.tracks[0] is not script._song.tracks[0]
+        assert script._song.tracks[0] == script._song.tracks[0]
+
+    def test_replies_name_the_track_by_index(self):
+        script = self._script([_Track("Gtr"), _Track("Bass")],
+                              [_ReturnTrack("Verb")])
+        assert script._set_track_mute({"track_index": 1, "mute": True})[
+            "track"] == {"index": 1, "name": "Bass"}
+        assert script._set_track_solo({"return_track_index": 0})[
+            "track"] == {"return_track": "A", "name": "Verb"}
+
+    def test_list_tracks_reports_each_kind(self):
+        script = self._script([_Track("Gtr"), _GroupTrack("Bus")],
+                              [_ReturnTrack("Verb")])
+        kinds = [row["kind"] for row in script._list_tracks()["tracks"]]
+        assert kinds == ["audio", "group", "return", "master"]
+
+    def test_exclusive_arm_keeps_the_target_armed(self):
+        gtr = _Track("Gtr", arm=True)
+        other = _Track("Other", arm=True)
+        script = self._script([gtr, other])
+        result = script._set_track_arm({"track_index": 0, "arm": True,
+                                        "exclusive": True})
+        assert result["disarmed"] == ["Other"]
+        assert gtr.arm is True and other.arm is False
+        assert not any("Other tracks" in w for w in result["warnings"])
+
+    def test_arm_warning_does_not_list_the_target(self):
+        gtr = _Track("Gtr")
+        script = self._script([gtr, _Track("Other", arm=True)])
+        result = script._set_track_arm({"track_index": 0, "arm": True})
+        assert "Other tracks are still armed: Other" in result["warnings"]
+
+    def test_exclusive_solo_keeps_the_target_soloed(self):
+        gtr = _Track("Gtr")
+        gtr.solo = True
+        other = _Track("Other")
+        other.solo = True
+        script = self._script([gtr, other])
+        result = script._set_track_solo({"track_index": 0, "solo": True,
+                                         "exclusive": True})
+        assert result["unsoloed"] == ["Other"]
+        assert gtr.solo is True and other.solo is False
+
+    def test_batch_refuses_the_same_track_twice(self):
+        gtr = _Track("Gtr")
+        script = self._script([gtr])
+        with pytest.raises(ValueError) as excinfo:
+            script._set_tracks_state({"changes": [
+                {"track_index": 0, "mute": True},
+                {"track_name": "gtr", "solo": True},
+            ]})
+        assert "change 2: 'Gtr' is already changed by change 1" in str(
+            excinfo.value)
+        assert gtr.mute is False and gtr.solo is False
+
+    def test_ambiguous_name_describes_every_match(self):
+        script = self._script([_Track("Gtr"), _Track("Gtr")],
+                              [_ReturnTrack("Gtr")])
+        with pytest.raises(ValueError) as excinfo:
+            script._resolve_track({"track_name": "gtr"}, allow_returns=True)
+        assert ("'Gtr' (track_index 1), 'Gtr' (track_index 2), "
+                "'Gtr' (return_track A)") in str(excinfo.value)
+
+    def test_track_info_indexes_the_group(self):
+        group = _GroupTrack("Bus")
+        child = _Track("Gtr")
+        child.is_grouped = True
+        child.group_track = _Wrapper(group)
+        script = self._script([group, child])
+        info = script._get_track_info(1, include_clip_slots=False)
+        assert info["group_track"] == {"index": 0, "name": "Bus"}

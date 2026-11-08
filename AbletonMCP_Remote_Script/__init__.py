@@ -836,7 +836,7 @@ class AbletonMCP(ControlSurface):
 
     def _index_of(self, track, pool):
         for i, candidate in enumerate(pool):
-            if candidate is track:
+            if candidate == track:
                 return i
         return None
 
@@ -1070,8 +1070,9 @@ class AbletonMCP(ControlSurface):
                     track.input_routing_channel = previous_channel
                 raise ValueError(
                     "{0} for input type '{1}'. The input was left "
-                    "unchanged. If Live had not refreshed the channel list "
-                    "yet, repeat the call.".format(e, input_type))
+                    "unchanged. Set input_type on its own first, then call "
+                    "again to change only input_channel (naming the same "
+                    "input_type).".format(e, input_type))
             raise
         track.input_routing_channel = channel
 
@@ -1091,7 +1092,7 @@ class AbletonMCP(ControlSurface):
                     "audible".format(track.name))
             if include_others:
                 others = [t.name for t in self._song.tracks
-                          if t is not track and self._can_arm(t)
+                          if t != track and self._can_arm(t)
                           and self._safe_attr(t, "arm", False)]
                 if others:
                     warnings.append("Other tracks are still armed: {0}".format(
@@ -1176,7 +1177,7 @@ class AbletonMCP(ControlSurface):
             if solo and params.get("exclusive", False):
                 pool = list(self._song.tracks) + list(self._song.return_tracks)
                 for other in pool:
-                    if other is not track and self._safe_attr(other, "solo",
+                    if other != track and self._safe_attr(other, "solo",
                                                               False):
                         other.solo = False
                         unsoloed.append(other.name)
@@ -1209,7 +1210,7 @@ class AbletonMCP(ControlSurface):
             disarmed = []
             if arm and params.get("exclusive", False):
                 for other in self._song.tracks:
-                    if (other is not track and self._can_arm(other)
+                    if (other != track and self._can_arm(other)
                             and self._safe_attr(other, "arm", False)):
                         other.arm = False
                         disarmed.append(other.name)
@@ -1258,8 +1259,8 @@ class AbletonMCP(ControlSurface):
         """Set a track's input type and channel by display name."""
         try:
             track = self._resolve_track(params)
-            input_type = params.get("input_type") or ""
-            input_channel = params.get("input_channel") or ""
+            input_type = str(params.get("input_type") or "")
+            input_channel = str(params.get("input_channel") or "")
             if not input_type:
                 raise ValueError("input_type is required")
             self._require_input_routing(track)
@@ -1292,7 +1293,7 @@ class AbletonMCP(ControlSurface):
         """Set monitoring to 'in', 'auto' or 'off'."""
         try:
             track = self._resolve_track(params)
-            state = str(params.get("state") or "").lower()
+            state = str(params.get("state") or "").strip().lower()
             states = self._monitoring_states()
             if state not in states:
                 raise ValueError(
@@ -1309,29 +1310,47 @@ class AbletonMCP(ControlSurface):
             raise
 
     def _plan_track_change(self, change, seen, number):
-        """Resolve and validate one set_tracks_state entry without writing."""
+        """Resolve and validate one set_tracks_state entry without writing.
+
+        Every problem found in the entry is raised together in one ValueError.
+        """
         if not isinstance(change, dict):
             raise ValueError("each change must be an object")
+        issues = []
         unknown = sorted(set(change) - set(self._TRACK_REF_KEYS)
                          - set(self._TRACK_STATE_KEYS))
         if unknown:
-            raise ValueError("unknown key(s): {0}".format(", ".join(unknown)))
+            issues.append("unknown key(s): {0}".format(", ".join(unknown)))
         requested = dict((k, change[k]) for k in self._TRACK_STATE_KEYS
                          if change.get(k) is not None)
         if not requested:
-            raise ValueError(
-                "nothing to change; give mute, solo, arm, input_type, "
-                "input_channel or monitoring")
-        track = self._resolve_track(change, allow_returns=True)
-        if id(track) in seen:
-            raise ValueError("'{0}' is already changed by change {1}".format(
-                track.name, seen[id(track)]))
-        seen[id(track)] = number
-
-        issues = []
+            issues.append("nothing to change; give mute, solo, arm, "
+                          "input_type, input_channel or monitoring")
         for key in ("mute", "solo", "arm"):
             if key in requested and not isinstance(requested[key], bool):
                 issues.append("{0} must be true or false".format(key))
+        for key in ("input_type", "input_channel"):
+            if key in requested:
+                requested[key] = str(requested[key])
+        if "monitoring" in requested:
+            state = str(requested["monitoring"]).strip().lower()
+            if state in self._monitoring_states():
+                requested["monitoring"] = state
+            else:
+                issues.append("monitoring must be one of in, auto, off "
+                              "(got '{0}')".format(requested["monitoring"]))
+
+        try:
+            track = self._resolve_track(change, allow_returns=True)
+        except (ValueError, IndexError, TypeError) as e:
+            raise ValueError("; ".join(issues + [str(e)]))
+        earlier = [n for other, n in seen if other == track]
+        if earlier:
+            issues.append("'{0}' is already changed by change {1}".format(
+                track.name, earlier[0]))
+        else:
+            seen.append((track, number))
+
         if "arm" in requested:
             try:
                 self._require_armable(track)
@@ -1365,15 +1384,10 @@ class AbletonMCP(ControlSurface):
             except ValueError as e:
                 issues.append(str(e))
         if "monitoring" in requested:
-            state = str(requested["monitoring"]).lower()
-            if state not in self._monitoring_states():
-                issues.append("monitoring must be one of in, auto, off "
-                              "(got '{0}')".format(requested["monitoring"]))
-            else:
-                try:
-                    self._require_monitorable(track)
-                except ValueError as e:
-                    issues.append(str(e))
+            try:
+                self._require_monitorable(track)
+            except ValueError as e:
+                issues.append(str(e))
         if issues:
             raise ValueError("; ".join(issues))
         return {
@@ -1393,8 +1407,7 @@ class AbletonMCP(ControlSurface):
                               requested.get("input_channel") or "")
         if "monitoring" in requested:
             states = self._monitoring_states()
-            track.current_monitoring_state = states[
-                str(requested["monitoring"]).lower()]
+            track.current_monitoring_state = states[requested["monitoring"]]
         if "mute" in requested:
             track.mute = requested["mute"]
         if "solo" in requested:
@@ -1416,7 +1429,7 @@ class AbletonMCP(ControlSurface):
             dry_run = bool(params.get("dry_run", False))
             if not isinstance(changes, list) or not changes:
                 raise ValueError("changes must be a non-empty list")
-            plans, problems, seen = [], [], {}
+            plans, problems, seen = [], [], []
             for number, change in enumerate(changes, 1):
                 try:
                     plans.append(self._plan_track_change(change, seen, number))
