@@ -1,4 +1,5 @@
 """Unit tests for track-level MCP tools."""
+import json
 import sys
 import os
 from unittest.mock import MagicMock, patch
@@ -13,7 +14,13 @@ sys.modules['mcp.server.fastmcp'] = _mock_fastmcp
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from MCP_Server.server import delete_track, get_track_deletion_status
+from MCP_Server.server import (
+    delete_track,
+    get_track_deletion_status,
+    set_track_arm,
+    set_track_mute,
+    set_track_solo,
+)
 
 
 class TestDeleteTrackSafetyGuard:
@@ -106,3 +113,73 @@ class TestTrackDeletionStatus:
 
         assert "Track deletion available" in result
         assert "up to 3 more track(s)" in result
+
+
+class TestTrackMuteSoloArm:
+    """The mixer-state tools: 1-based in, 0-based on the wire."""
+
+    @patch('MCP_Server.server.get_ableton_connection')
+    def test_mute_converts_the_index_and_reports_the_name(self, mock_conn):
+        mock_ableton = MagicMock()
+        mock_ableton.send_command.return_value = {
+            "track": {"index": 2, "name": "Bass"}, "mute": True}
+        mock_conn.return_value = mock_ableton
+
+        result = json.loads(set_track_mute(MagicMock(), track_index=3, mute=True))
+
+        assert result["ok"] is True
+        assert result["track"] == {"index": 3, "name": "Bass"}
+        assert result["mute"] is True
+        call = mock_ableton.send_command.call_args
+        assert call[0][0] == "set_track_mute"
+        assert call[0][1]["track_index"] == 2      # 3 (1-based) -> 2 (0-based)
+        assert call[0][1]["mute"] is True
+
+    @patch('MCP_Server.server.get_ableton_connection')
+    def test_unmute_reads_as_unmuted(self, mock_conn):
+        mock_ableton = MagicMock()
+        mock_ableton.send_command.return_value = {
+            "track": {"index": 0, "name": "Bass"}, "mute": False}
+        mock_conn.return_value = mock_ableton
+
+        result = json.loads(set_track_mute(MagicMock(), track_index=1, mute=False))
+
+        assert result["mute"] is False
+
+    @patch('MCP_Server.server.get_ableton_connection')
+    def test_solo_converts_the_index(self, mock_conn):
+        mock_ableton = MagicMock()
+        mock_ableton.send_command.return_value = {
+            "track": {"index": 1, "name": "Drums"}, "solo": True}
+        mock_conn.return_value = mock_ableton
+
+        result = json.loads(set_track_solo(MagicMock(), track_index=2, solo=True))
+
+        assert result["track"]["name"] == "Drums" and result["solo"] is True
+        call = mock_ableton.send_command.call_args
+        assert call[0][0] == "set_track_solo"
+        assert call[0][1]["track_index"] == 1
+
+    @patch('MCP_Server.server.get_ableton_connection')
+    def test_arm_converts_the_index(self, mock_conn):
+        mock_ableton = MagicMock()
+        mock_ableton.send_command.return_value = {
+            "track": {"index": 3, "name": "Synth"}, "arm": True}
+        mock_conn.return_value = mock_ableton
+
+        result = json.loads(set_track_arm(MagicMock(), track_index=4, arm=True))
+
+        assert result["track"] == {"index": 4, "name": "Synth"}
+        call = mock_ableton.send_command.call_args
+        assert call[0][0] == "set_track_arm"
+        assert call[0][1]["track_index"] == 3
+
+    @patch('MCP_Server.server.get_ableton_connection')
+    def test_zero_index_is_rejected_before_the_socket(self, mock_conn):
+        mock_ableton = MagicMock()
+        mock_conn.return_value = mock_ableton
+
+        for tool in (set_track_mute, set_track_solo, set_track_arm):
+            result = tool(MagicMock(), track_index=0)
+            assert "1-based" in result, (tool.__name__, result)
+        mock_ableton.send_command.assert_not_called()

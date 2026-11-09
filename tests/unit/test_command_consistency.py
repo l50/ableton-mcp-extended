@@ -47,7 +47,21 @@ _TOOL_ARGS = {
     "delete_arrangement_clip": {"clip_index": 1},
     "set_arrangement_clip_property": {"muted": True},
     "delete_track": {"track_index": 1},
+    "set_track_mute": {"track_index": 1},
+    "set_track_solo": {"track_index": 1},
+    "set_track_arm": {"track_index": 1},
+    "set_track_input": {"track_index": 1},
+    "set_track_monitoring": {"track_index": 1, "state": "in"},
+    "get_track_routing_options": {"track_index": 1},
+    "set_tracks_state": {"changes": [{"track_index": 1, "mute": True}]},
 }
+
+# Read commands whose names do not start with "get_".
+_NON_GET_READS = {"list_tracks"}
+
+
+def _is_read(command):
+    return command.startswith("get_") or command in _NON_GET_READS
 
 # Enough session state for delete_track to pass its last-track guard.
 _RESPONSE = {"track_count": 2}
@@ -114,7 +128,7 @@ def test_every_mcp_tool_sends_a_command(sent_by_tool):
 
 def test_every_write_command_the_mcp_sends_is_modifying(sent_by_tool):
     sent = set().union(*sent_by_tool.values())
-    writes = {c for c in sent if not c.startswith("get_")}
+    writes = {c for c in sent if not _is_read(c)}
     unclassified = sorted(writes - set(server.MODIFYING_COMMANDS))
     assert not unclassified, (
         "MCP tools send write commands missing from MODIFYING_COMMANDS "
@@ -123,7 +137,7 @@ def test_every_write_command_the_mcp_sends_is_modifying(sent_by_tool):
 
 def test_no_read_command_the_mcp_sends_is_modifying(sent_by_tool):
     sent = set().union(*sent_by_tool.values())
-    reads = {c for c in sent if c.startswith("get_")}
+    reads = {c for c in sent if _is_read(c)}
     misclassified = sorted(reads & set(server.MODIFYING_COMMANDS))
     assert not misclassified, (
         "Read commands listed as modifying: {0}".format(misclassified))

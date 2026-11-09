@@ -184,7 +184,7 @@ echo $PWD/MCP_Server/server.py
 Look for a **🔨 hammer icon** in the chat interface - this indicates MCP tools are loaded.
 
 **For Cursor:**
-You'll see a green dot next to the MCP server icon, and a message saying "40 tools enabled".
+You'll see a green dot next to the MCP server icon, and a message saying how many tools are enabled.
 
 You might have to restart your AI assistant in order for changes to impact.
 
