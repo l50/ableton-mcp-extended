@@ -235,6 +235,16 @@ This project includes several specialized components:
 - **[Installation Guide](INSTALLATION.md)** - Detailed setup instructions
 - **[User Guide](README.md)** - What, which, and how  
 
+### Running the tests
+
+The unit tests stub out Ableton Live, so they run without it:
+
+```bash
+uv run --extra test python -m pytest --cov
+```
+
+`--cov` measures `MCP_Server` and `AbletonMCP_Remote_Script` and fails the run if total coverage drops below the `fail_under` value in `pyproject.toml`. Tests marked `integration` need a running Live instance and are skipped by default.
+
 ---
 
 ## Community & Support
