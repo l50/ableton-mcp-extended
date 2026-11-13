@@ -2626,6 +2626,214 @@ def navigate_device_preset(
         return f"Error navigating preset: {str(e)}"
 
 
+# ── Export (UI automation, macOS) ────────────────────────────────
+#
+# Live's Export Audio/Video is not in the Live Object Model, so these tools
+# drive the dialog through macOS UI scripting (see live_export.py) instead of
+# sending a Remote Script command. Only the render range uses the LOM: the
+# range is read there (and, for "arrangement", selected with the loop brace),
+# and its length in seconds goes to the exporter to check the file against.
+
+
+def _load_live_export_module():
+    try:
+        from . import live_export  # imported as MCP_Server.server
+    except ImportError:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import live_export  # run as a script: python MCP_Server/server.py
+    return live_export
+
+
+def _export_failure(message: str, **extra: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "ok": False, "status": "failed", "output_path": None,
+        "output_files": [], "error": message, "warnings": [],
+    }
+    payload.update(extra)
+    return payload
+
+
+def _arrangement_end_beats(info: Dict[str, Any]) -> float:
+    """End of the last arrangement clip, in beats (0 when there are none)."""
+    end = 0.0
+    for track in info.get("tracks", []):
+        for clip in track.get("arrangement_clips", []):
+            end = max(end, float(clip.get("end_time") or 0))
+    return end
+
+
+def _run_live_export(
+    output_path: str,
+    format: str,
+    sample_rate: int,
+    bit_depth: int,
+    render_range: str,
+    normalize: bool,
+    overwrite: bool,
+    render_timeout: float,
+    create_video: bool,
+) -> str:
+    live_export = _load_live_export_module()
+    range_name = str(render_range or "").strip().lower()
+    if range_name not in live_export.RENDER_RANGES:
+        return json.dumps(_export_failure(
+            "render_range must be one of " + ", ".join(live_export.RENDER_RANGES)
+            + f" (got '{render_range}')"
+        ))
+
+    request = live_export.ExportRequest(
+        output_path=output_path,
+        format=format,
+        sample_rate=sample_rate,
+        bit_depth=bit_depth,
+        normalize=normalize,
+        select_loop=range_name != "selection",
+        create_video=create_video,
+        overwrite=overwrite,
+        render_timeout=render_timeout,
+    )
+    restore_loop = None
+    ableton = None
+    try:
+        request.validate()
+        live_export.check_preconditions(request)
+        if range_name != "selection":
+            ableton = get_ableton_connection()
+            info = ableton.send_command("get_arrangement_info", {"track_index": -1})
+            transport = info.get("transport", {})
+            if transport.get("back_to_arranger"):
+                return json.dumps(_export_failure(
+                    "Session clips are overriding the Arrangement (Back to Arrangement "
+                    "is lit in Live), so the render would not be the Arrangement; click "
+                    "Back to Arrangement, or use render_range='selection' to render "
+                    "what is playing",
+                    render_range=range_name,
+                ))
+            if range_name == "arrangement":
+                beats = _arrangement_end_beats(info)
+                if beats <= 0:
+                    return json.dumps(_export_failure(
+                        "the Arrangement has no clips to render; use render_range="
+                        "'loop' or 'selection' instead",
+                        render_range=range_name,
+                    ))
+            else:
+                beats = float(transport["loop_length"])
+            request.expected_seconds = beats * 60.0 / float(transport["tempo"])
+            if range_name == "arrangement":
+                restore_loop = {
+                    "enabled": bool(transport.get("loop_enabled")),
+                    "start": float(transport.get("loop_start") or 0),
+                    "length": float(transport.get("loop_length") or 0),
+                }
+                # Point the loop brace at the whole Arrangement so Select Loop
+                # pre-fills Render Start/Length; the brace is restored below.
+                ableton.send_command("set_arrangement_loop", {
+                    "enabled": restore_loop["enabled"], "start": 0.0, "length": beats,
+                })
+            ableton.send_command("set_view", {"view_name": "Arranger"})
+        result = live_export.export_from_live(request)
+    except Exception as e:
+        logger.error(f"Error exporting from Live: {str(e)}")
+        result = _export_failure(f"Error exporting from Live: {str(e)}")
+    finally:
+        if restore_loop is not None and ableton is not None:
+            try:
+                ableton.send_command("set_arrangement_loop", restore_loop)
+            except Exception as e:
+                restore_warning = f"could not restore the loop brace: {e}"
+                logger.error(restore_warning)
+                result.setdefault("warnings", []).append(restore_warning)
+    result["render_range"] = range_name
+    return json.dumps(result)
+
+
+@mcp.tool()
+def export_audio(
+    ctx: Context,
+    output_path: str,
+    format: str = "wav",
+    sample_rate: int = 44100,
+    bit_depth: int = 24,
+    render_range: str = "arrangement",
+    normalize: bool = False,
+    overwrite: bool = False,
+    render_timeout: float = 900.0,
+) -> str:
+    """Render Live's Main output to an audio file via File > Export Audio/Video.
+
+    macOS only. This drives Live's UI (it is not a Remote Script command): Live
+    is brought to the front and must not be showing another dialog. The app
+    running this server needs Accessibility permission. Do not use the mouse
+    or keyboard until it returns. Live keeps the dialog settings it was given.
+
+    Parameters:
+    - output_path: Absolute path of the file to write, e.g. "/Users/me/Music/song.wav".
+      The folder must exist. The extension is optional; if given it must match format.
+    - format: "wav", "aiff", "flac" (lossless PCM) or "mp3" (CBR 320).
+    - sample_rate: 22050, 32000, 44100, 48000, 88200, 96000, 176400 or 192000.
+    - bit_depth: 16, 24 or 32 (PCM formats only).
+    - render_range: "arrangement" = bar 1 to the end of the last arrangement clip
+      (the loop brace is moved to select it, then restored); "loop" = the current
+      loop brace; "selection" = whatever Live pre-fills (the current time selection).
+      "arrangement" and "loop" refuse to run while Session clips override the
+      Arrangement (Back to Arrangement lit).
+    - normalize: Normalize the rendered file.
+    - overwrite: Replace output_path if it already exists.
+    - render_timeout: Seconds to wait for the render to finish.
+
+    Returns JSON: {ok, status, output_path, output_files, expected_path,
+    format, sample_rate, bit_depth, normalize, create_video, render_range,
+    expected_seconds, rendered_seconds, length_verified, dialog_settings,
+    file_info, steps, warnings, error?, dialog_text?}. ok is true only when
+    the file exists and has stopped growing, and it is false when afinfo
+    reports a sample rate, bit depth or, for "arrangement" and "loop", length
+    other than the one requested. If afinfo cannot be run or does not report
+    one of those, ok stays true and warnings says what was not verified.
+
+    render_range is the range that was asked for. Render Start/Length are not
+    read back from the dialog, so the only check on the range is the file's
+    length: rendered_seconds (from afinfo) against expected_seconds (the
+    range's beats at the Set's current tempo), with length_verified true when
+    they match. A Set whose tempo changes inside the range fails that check
+    even when the file is right. "selection" has no expected length and is
+    never length-verified.
+    """
+    return _run_live_export(
+        output_path, format, sample_rate, bit_depth, render_range,
+        normalize, overwrite, render_timeout, create_video=False,
+    )
+
+
+@mcp.tool()
+def export_video(
+    ctx: Context,
+    output_path: str,
+    format: str = "wav",
+    sample_rate: int = 44100,
+    bit_depth: int = 24,
+    render_range: str = "arrangement",
+    normalize: bool = False,
+    overwrite: bool = False,
+    render_timeout: float = 1800.0,
+) -> str:
+    """Render the Arrangement's video, with the rendered audio, via Export Audio/Video.
+
+    Same UI flow, requirements and parameters as export_audio, with Live's
+    Create Video switch turned on. Live only enables that switch when the
+    Arrangement contains video clips, and always writes the audio file too.
+    The video goes in the same folder using the encoder currently chosen in
+    the dialog. output_path names the audio file.
+
+    Returns JSON like export_audio plus video_files. ok is true only when both
+    the audio file and a new video file exist in the folder.
+    """
+    return _run_live_export(
+        output_path, format, sample_rate, bit_depth, render_range,
+        normalize, overwrite, render_timeout, create_video=True,
+    )
+
+
 # Main execution
 def _load_supervisor_module():
     try:

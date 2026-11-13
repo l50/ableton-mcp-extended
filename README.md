@@ -63,6 +63,11 @@ This project provides comprehensive, programmatic control over the Ableton Live 
     * Load instruments, effects, and samples directly from a browser path or URI.
     * Import audio files directly into audio tracks or clip slots.
 
+* **Exporting Audio and Video (macOS):**
+    * Render the Main output to WAV, AIFF, FLAC or MP3 with `export_audio`, choosing sample rate, bit depth, normalize and the range (whole Arrangement, loop brace, or current selection).
+    * Render the Arrangement's video along with the audio with `export_video`.
+    * These drive Live's Export Audio/Video dialog through macOS UI scripting. See [Exporting audio and video](#exporting-audio-and-video-macos) for the requirements.
+
 * **Voice & Audio Generation** 
     * Text-to-Speech Integration: Generate narration, vocal samples, or spoken elements through ElevenLabs MCP [included].
     * Custom Voice Creation: Clone voices for unique character in your tracks  
@@ -204,6 +209,48 @@ Example mcp-config.json:
 ```
 
 </details>
+
+---
+
+## Exporting Audio and Video (macOS)
+
+Live's Remote Script API has no way to start an export, so `export_audio` and `export_video` work through Live's UI instead. They bring Live to the front, open **File > Export Audio/Video**, set the dialog, fill in the macOS Save panel, wait for the render, and then check the file before they report success.
+
+Requirements:
+
+- macOS, with Ableton Live running. Live must not have another dialog open. The tools find the Export dialog's controls by the accessibility names Live 12 gives them, so an older Live may not work.
+- The app that runs the MCP server (Claude Desktop, your terminal, Cursor) needs **Accessibility** permission (System Settings > Privacy & Security > Accessibility). It also needs permission to control **System Events** (Automation). macOS asks for this the first time.
+- Leave the mouse and keyboard alone until the tool returns. Live is in front during the export, and the call blocks until the render finishes, which can take minutes.
+
+What gets set:
+
+| Parameter | Values | Default |
+| --- | --- | --- |
+| `output_path` | Absolute file path. The folder must exist, and the extension is optional. | required |
+| `format` | `wav`, `aiff`, `flac`, `mp3` (CBR 320) | `wav` |
+| `sample_rate` | 22050, 32000, 44100, 48000, 88200, 96000, 176400, 192000 | 44100 |
+| `bit_depth` | 16, 24, 32 (PCM only) | 24 |
+| `render_range` | `arrangement` (bar 1 to the end of the last clip), `loop` (the loop brace), `selection` (whatever Live pre-fills) | `arrangement` |
+| `normalize` | true / false | false |
+| `overwrite` | Replace an existing file | false |
+| `render_timeout` | Seconds to wait for the render to finish | 900 (`export_video`: 1800) |
+
+Rendered Track is always set to Main. `arrangement` moves the loop brace over the whole Arrangement to select it, and puts the brace back afterwards. `arrangement` and `loop` also switch Live to the Arrangement View and leave it there. Live keeps the dialog settings these tools choose for your next manual export. Options the tools don't expose (dither, Render as Loop, Convert to Mono, Create Analysis File, video encoder) are left as they are.
+
+Live renders what is playing, so `arrangement` and `loop` refuse to run while Session clips override the Arrangement (the Back to Arrangement button is lit). Click it first, or use `selection` to render what you hear.
+
+The reply is JSON. `ok` is true only when the output file exists and has stopped growing, and `afinfo` doesn't report a different sample rate or bit depth or, for `arrangement` and `loop`, a different length than the request. If `afinfo` can't be run or leaves one of those values out, `ok` stays true and `warnings` says what wasn't checked. A failure comes back as `ok: false` with the reason in `error`. That covers a dialog that never opened, a control that wouldn't change, an unwritable folder, an existing file, a render timeout, or an error message Live showed (quoted verbatim in `dialog_text`). The reply also lists every UI step it took.
+
+The tools don't read Render Start and Render Length back from the dialog, so `render_range` in the reply is the range you asked for, and the file's length is the only check on it. `rendered_seconds` is the length `afinfo` reports. `expected_seconds` is the range's length in beats at the Set's current tempo, and `length_verified` is true when the two agree to within half a second. If they don't, the file stays where it was written and the reply is `ok: false`. That check assumes one tempo, so a Set whose tempo changes inside the range fails it even when the file is right. `selection` has no expected length and is never length-verified.
+
+`export_video` needs video clips in the Arrangement, because Live only enables Create Video when there are some. The video is written next to the audio file using the encoder already chosen in the dialog.
+
+These tools can't run in CI. The unit tests stub out the UI scripting. A guarded manual check runs a real export against a scratch Set:
+
+```bash
+ABLETON_MCP_LIVE_TESTS=1 ABLETON_MCP_EXPORT_TESTS=1 \
+    uv run --extra test python -m pytest -m integration tests/integration/test_live_export_live.py -s
+```
 
 ---
 

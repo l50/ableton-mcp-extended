@@ -330,6 +330,18 @@ Add AI voice generation to your workflow:
 4. **Use full path:** If still issues, use full Python path in config
 </details>
 
+<details>
+<summary><strong>🍎 export_audio / export_video say "macOS blocked UI scripting"</strong></summary>
+
+The export tools drive Live's Export Audio/Video dialog through macOS UI scripting, which needs permissions the other tools don't.
+
+**Solutions:**
+1. System Settings > Privacy & Security > **Accessibility**: turn on the app that runs the MCP server (Claude, Terminal, Cursor, ...)
+2. System Settings > Privacy & Security > **Automation**: allow that app to control **System Events**
+3. Restart the app after changing either setting
+4. Close any dialog open in Live, and keep your hands off the mouse and keyboard while an export runs
+</details>
+
 ### 🔧 Advanced Troubleshooting
 
 **Enable Debug Mode:**
