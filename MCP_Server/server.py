@@ -2782,12 +2782,14 @@ def export_audio(
     - overwrite: Replace output_path if it already exists.
     - render_timeout: Seconds to wait for the render to finish.
 
-    Returns JSON: {ok, status, output_path, output_files, format, sample_rate,
-    bit_depth, normalize, render_range, expected_seconds, rendered_seconds,
-    length_verified, dialog_settings, file_info, steps, warnings, error?,
-    dialog_text?}. ok is true only when the file exists, has stopped growing,
-    and afinfo agrees on sample rate, bit depth and, for "arrangement" and
-    "loop", length.
+    Returns JSON: {ok, status, output_path, output_files, expected_path,
+    format, sample_rate, bit_depth, normalize, create_video, render_range,
+    expected_seconds, rendered_seconds, length_verified, dialog_settings,
+    file_info, steps, warnings, error?, dialog_text?}. ok is true only when
+    the file exists and has stopped growing, and it is false when afinfo
+    reports a sample rate, bit depth or, for "arrangement" and "loop", length
+    other than the one requested. If afinfo cannot be run or does not report
+    one of those, ok stays true and warnings says what was not verified.
 
     render_range is the range that was asked for. Render Start/Length are not
     read back from the dialog, so the only check on the range is the file's
