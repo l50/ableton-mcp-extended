@@ -271,7 +271,7 @@ function safe(f, dflt) {
 }
 function norm(s) {
   return String(s === undefined || s === null ? '' : s).toLowerCase()
-    .replace(/…/g, '...').replace(/[\s,]+/g, '');
+    .replace(/…/g, '...').replace(/^[\u2714\u2713]/, '').replace(/[\s,]+/g, '');
 }
 function proc(cmd) {
   var ps = SE.processes.whose({bundleIdentifier: cmd.bundle});
@@ -323,32 +323,36 @@ function matches(value, values) {
   for (var i = 0; i < values.length; i++) if (norm(values[i]) === v) return true;
   return false;
 }
-function pickFromMenu(p, el, values, before) {
-  // Live choosers open a menu, either as the control's child or as a new
-  // window; click the item whose name matches.
-  press(el);
-  delay(0.4);
-  var pools = [];
-  safe(function () { el.menus().forEach(function (m) { pools.push(m.menuItems()); }); }, null);
-  safe(function () {
-    p.windows().forEach(function (w) {
-      var n = safe(function () { return w.name(); }, '');
-      if (before.indexOf(n) < 0) pools.push(w.entireContents());
-    });
-  }, null);
-  var seen = [];
-  for (var i = 0; i < pools.length; i++) {
-    for (var j = 0; j < pools[i].length; j++) {
-      var item = pools[i][j];
-      var ls = labelsOf(item).concat([safe(function () { return item.value(); }, '')]);
-      for (var k = 0; k < ls.length; k++) {
-        if (ls[k]) seen.push(String(ls[k]));
-        if (ls[k] && matches(ls[k], values)) { press(item); delay(0.3); return seen; }
-      }
+function menuItemsOf(p, el) {
+  // Live 12 opens a chooser's list as a new untitled AXUnknown window of
+  // AXMenuItems (the current choice is prefixed with a check mark). Untitled
+  // AXUnknown windows can already be open, so scan them all for menu items
+  // instead of looking for a window that is new by name.
+  var items = [];
+  safe(function () { el.menus().forEach(function (m) { items = items.concat(m.menuItems()); }); }, null);
+  var ws = safe(function () { return p.windows(); }, []);
+  for (var i = 0; i < ws.length; i++) {
+    if (safe(function () { return ws[i].subrole(); }, '') !== 'AXUnknown') continue;
+    var cs = safe(function () { return ws[i].entireContents(); }, []);
+    for (var j = 0; j < cs.length; j++) {
+      if (safe(function () { return cs[j].role(); }, '') === 'AXMenuItem') items.push(cs[j]);
     }
   }
-  SE.keyCode(53);  // Esc closes the open menu
-  delay(0.2);
+  return items;
+}
+function pickFromMenu(p, el, values) {
+  press(el);
+  delay(0.6);
+  var items = menuItemsOf(p, el);
+  var seen = [];
+  for (var i = 0; i < items.length; i++) {
+    var name = String(safe(function () { return items[i].name(); }, ''));
+    if (!name) continue;
+    seen.push(name);
+    if (matches(name, values)) { press(items[i]); delay(0.4); return seen; }
+  }
+  SE.keyCode(53);  // Esc closes the open menu, not the dialog
+  delay(0.3);
   return seen;
 }
 function controlList(w) {
@@ -430,14 +434,9 @@ function dispatch(cmd) {
       if (!safe(function () { return el.enabled(); }, true))
         return {ok: false, before: before, after: before,
                 error: "'" + cmd.label + "' is disabled in the Export dialog"};
-      var seen = [];
-      try { el.value = cmd.values[0]; delay(0.3); } catch (e) {}
+      // Live's choosers do not accept AXValue writes; pick from the menu.
+      var seen = pickFromMenu(p, el, cmd.values);
       var after = String(safe(function () { return el.value(); }, ''));
-      if (!matches(after, cmd.values)) {
-        var names = p.windows().map(function (x) { return safe(function () { return x.name(); }, ''); });
-        seen = pickFromMenu(p, el, cmd.values, names);
-        after = String(safe(function () { return el.value(); }, ''));
-      }
       return {before: before, after: after, seen: seen.slice(0, 40)};
     }
     case 'press': {
