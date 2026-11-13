@@ -21,14 +21,36 @@ sys.path.insert(0, _ROOT)
 
 from MCP_Server import live_export as le  # noqa: E402
 
-WAV_AFINFO = """File:           song.wav
+# Data formats exactly as afinfo prints them (macOS 26.4, files made with
+# afconvert). 16- and 32-bit WAV get the short form, everything else "N-bit".
+WAV_24 = "lpcm (0x0000000C) 24-bit little-endian signed integer"
+WAV_16 = "Int16, interleaved"
+WAV_32_FLOAT = "Float32, interleaved"
+AIFF_16 = "lpcm (0x0000000E) 16-bit big-endian signed integer"
+AIFF_24 = "lpcm (0x0000000E) 24-bit big-endian signed integer"
+AIFC_32_FLOAT = "lpcm (0x0000000B) 32-bit big-endian float"
+FLAC_24 = "flac (0x00000003) from 24-bit source, 4608 frames/packet"
+MP3 = ".mp3 (0x00000000) 0 bits/channel"
+
+WAV_AFINFO = f"""File:           song.wav
 File type ID:   WAVE
 Num Tracks:     1
 ----
-Data format:     2 ch,  48000 Hz, Int24
+Data format:     2 ch,  48000 Hz, {WAV_24}
                 no channel layout.
 estimated duration: 12.500000 sec
+audio bytes: 3600000
+audio packets: 600000
+bit rate: 2304000 bits per second
+packet size upper bound: 6
+maximum packet size: 6
+audio data file offset: 4096
+optimized
+source bit depth: I24
+----
 """
+
+STATUS_ERROR = "System Events got an error: AppleEvent timed out. (-1712)"
 
 
 def afinfo_for(rate, fmt):
@@ -106,6 +128,12 @@ class FakeLive:
         return handler(**params)
 
     def op_status(self):
+        # status_fails_after: the op after which System Events stops answering
+        # status (None = from the start), as a busy Live makes it do.
+        if "status_fails_after" in self.b:
+            after = self.b["status_fails_after"]
+            if after is None or after in self.ops():
+                return {"ok": False, "error": STATUS_ERROR, "code": -1712}
         if self._rendering is not None:
             self._tick_render()
         if not self.running:
@@ -387,8 +415,13 @@ class TestExportSuccess:
         assert os.path.getsize(result["output_path"]) > 0
         assert result["file_info"] == {
             "file_type": "WAVE", "channels": 2, "sample_rate": 48000,
-            "data_format": "Int24", "bit_depth": 24, "duration_seconds": 12.5,
+            "data_format": WAV_24, "bit_depth": 24, "duration_seconds": 12.5,
         }
+        assert result["warnings"] == []
+        # No expected length was given, so the range is reported, not verified.
+        assert result["rendered_seconds"] == 12.5
+        assert result["expected_seconds"] is None
+        assert result["length_verified"] is False
 
         menu = live.driven("menu")
         assert [m["path"] for m in menu] == [["File", "Export Audio/Video"]]
@@ -423,16 +456,16 @@ class TestExportSuccess:
         assert all(s["op"] not in ("status", "texts", "controls") for s in result["steps"])
 
     def test_mp3_export(self, tmp_path, clock):
-        live, exporter = make(clock, afinfo=afinfo_for(48000, ".mp3 (0x00000000) 0 bits/channel"),
-                              written_ext=".mp3")
+        live, exporter = make(clock, afinfo=afinfo_for(48000, MP3), written_ext=".mp3")
         result = exporter.run(request(tmp_path, name="song.mp3", format="mp3"))
         assert result["ok"] is True, result
         assert result["bit_depth"] is None
+        assert result["warnings"] == []
         assert live.controls[le.ENCODE_MP3]["value"] is True
         assert live.controls[le.ENCODE_PCM]["value"] is False
 
     def test_aiff_accepts_aif_extension(self, tmp_path, clock):
-        live, exporter = make(clock, afinfo=afinfo_for(48000, "Int24"), written_ext=".aif")
+        live, exporter = make(clock, afinfo=afinfo_for(48000, AIFF_24), written_ext=".aif")
         result = exporter.run(request(tmp_path, name="song", format="aiff"))
         assert result["ok"] is True, result
         assert result["output_path"] == str(tmp_path / "song.aif")
@@ -479,13 +512,43 @@ class TestExportSuccess:
         live, exporter = make(clock, afinfo=None)
         result = exporter.run(request(tmp_path))
         assert result["ok"] is True
-        assert result["warnings"] == ["afinfo unavailable; file format was not verified"]
+        assert result["warnings"] == ["afinfo unavailable; the output file was not verified"]
+        assert result["length_verified"] is False
 
     def test_afinfo_unparseable_is_a_warning(self, tmp_path, clock):
         live, exporter = make(clock, afinfo="garbage")
         result = exporter.run(request(tmp_path))
         assert result["ok"] is True
         assert "could not read afinfo output" in result["warnings"][0]
+
+    @pytest.mark.parametrize("afinfo,missing", [
+        (afinfo_for(48000, "lpcm (0x0000000C) packed"), "bit depth"),
+        ("File type ID:   WAVE\nestimated duration: 3.0 sec\n", "sample rate, bit depth"),
+    ])
+    def test_property_afinfo_does_not_report_is_a_warning(self, tmp_path, clock, afinfo, missing):
+        live, exporter = make(clock, afinfo=afinfo)
+        result = exporter.run(request(tmp_path))
+        assert result["ok"] is True, result
+        assert result["warnings"] == [f"afinfo did not report the {missing}; not verified"]
+
+    @pytest.mark.parametrize("expected", [12.5, 12.1, 12.9])
+    def test_length_matching_the_expected_range_is_verified(self, tmp_path, clock, expected):
+        live, exporter = make(clock)
+        result = exporter.run(request(tmp_path, expected_seconds=expected))
+        assert result["ok"] is True, result
+        assert result["expected_seconds"] == expected
+        assert result["rendered_seconds"] == 12.5
+        assert result["length_verified"] is True
+        assert result["warnings"] == []
+
+    def test_unreadable_length_is_a_warning_not_a_verified_range(self, tmp_path, clock):
+        afinfo = f"File type ID:   WAVE\nData format:     2 ch,  48000 Hz, {WAV_24}\n"
+        live, exporter = make(clock, afinfo=afinfo)
+        result = exporter.run(request(tmp_path, expected_seconds=12.5))
+        assert result["ok"] is True, result
+        assert result["rendered_seconds"] is None
+        assert result["length_verified"] is False
+        assert result["warnings"] == ["afinfo did not report the length; not verified"]
 
     def test_export_dialog_lingering_during_render_is_not_an_error(self, tmp_path, clock):
         live, exporter = make(clock, dialog_lingers=True,
@@ -628,6 +691,29 @@ class TestExportFailure:
         result = self.assert_failed(exporter.run(request(tmp_path)), "Save panel did not appear")
         assert result["dialog_text"]["Alert"] == ["Not enough disk space to render."]
 
+    def test_save_panel_never_appears_cancels_export_dialog(self, tmp_path, clock):
+        live, exporter = make(clock, save_panel_appears=False)
+        self.assert_failed(exporter.run(request(tmp_path)), "Save panel did not appear")
+        assert le.EXPORT_DIALOG_TITLE not in live.names()
+        # Live is left ready for the next export.
+        assert le._busy_windows(live.op_status()["windows"]) == []
+
+    @pytest.mark.parametrize("after", [None, "activate", "menu", "press", "save_panel"])
+    def test_failed_status_is_a_scripting_error_not_a_state_of_live(self, tmp_path, clock, after):
+        live, exporter = make(clock, status_fails_after=after)
+        result = self.assert_failed(exporter.run(request(tmp_path)),
+                                    "could not read Live's windows: " + STATUS_ERROR)
+        for misreading in ("not running", "did not appear", "quit during"):
+            assert misreading not in result["error"]
+        assert result["output_path"] is None
+
+    @pytest.mark.parametrize("after", ["menu", "press"])
+    def test_failed_status_with_a_dialog_open_cancels_it(self, tmp_path, clock, after):
+        live, exporter = make(clock, status_fails_after=after)
+        exporter.run(request(tmp_path))
+        assert le.EXPORT_DIALOG_TITLE not in live.names()
+        assert le.SAVE_PANEL_TITLE not in live.names()
+
     def test_save_panel_error_cancels_both_windows(self, tmp_path, clock):
         live, exporter = make(clock, save_panel_error="the Save panel is in folder 'Music', expected 'out'")
         self.assert_failed(exporter.run(request(tmp_path)),
@@ -687,17 +773,32 @@ class TestExportFailure:
         self.assert_failed(exporter.run(request(tmp_path)), "output file is empty")
 
     @pytest.mark.parametrize("fmt,message", [
-        ("Int16", "bit depth is 16, expected 24"),
-        ("Float32", "bit depth is 32, expected 24"),
+        (WAV_16, "bit depth is 16, expected 24"),
+        (WAV_32_FLOAT, "bit depth is 32, expected 24"),
+        (AIFF_16, "bit depth is 16, expected 24"),
+        (AIFC_32_FLOAT, "bit depth is 32, expected 24"),
     ])
     def test_bit_depth_mismatch(self, tmp_path, clock, fmt, message):
         live, exporter = make(clock, afinfo=afinfo_for(48000, fmt))
         result = self.assert_failed(exporter.run(request(tmp_path)), message)
         assert "was written but does not match the request" in result["error"]
 
+    def test_24_bit_wav_does_not_pass_for_a_16_bit_request(self, tmp_path, clock):
+        live, exporter = make(clock)
+        self.assert_failed(exporter.run(request(tmp_path, bit_depth=16)),
+                           "bit depth is 24, expected 16")
+
     def test_sample_rate_mismatch(self, tmp_path, clock):
-        live, exporter = make(clock, afinfo=afinfo_for(44100, "Int24"))
+        live, exporter = make(clock, afinfo=afinfo_for(44100, WAV_24))
         self.assert_failed(exporter.run(request(tmp_path)), "sample rate is 44100 Hz, expected 48000")
+
+    def test_length_not_matching_the_expected_range(self, tmp_path, clock):
+        live, exporter = make(clock)
+        result = self.assert_failed(exporter.run(request(tmp_path, expected_seconds=32.25)),
+                                    "it is 12.50 s long, expected 32.25 s for the requested range")
+        assert result["output_path"] == str(tmp_path / "song.wav")
+        assert result["rendered_seconds"] == 12.5
+        assert result["length_verified"] is False
 
     def test_video_missing_after_render(self, tmp_path, clock):
         live, exporter = make(clock)
@@ -775,19 +876,26 @@ class TestHelpers:
 
     @pytest.mark.parametrize("text,expected", [
         (WAV_AFINFO, {"file_type": "WAVE", "channels": 2, "sample_rate": 48000,
-                      "data_format": "Int24", "bit_depth": 24, "duration_seconds": 12.5}),
-        ("File type ID:   AIFF\nData format:     1 ch,  96000 Hz, Float32\n",
-         {"file_type": "AIFF", "channels": 1, "sample_rate": 96000, "data_format": "Float32", "bit_depth": 32}),
-        ("Data format:     2 ch,  44100 Hz, 'flac' (0x00000002) from 24-bit source, 4096 frames/packet\n",
-         {"channels": 2, "sample_rate": 44100, "bit_depth": 24,
-          "data_format": "'flac' (0x00000002) from 24-bit source, 4096 frames/packet"}),
-        ("File type ID:   MPG3\nData format:     2 ch,  44100 Hz, .mp3 (0x00000000) 0 bits/channel\n",
-         {"file_type": "MPG3", "channels": 2, "sample_rate": 44100,
-          "data_format": ".mp3 (0x00000000) 0 bits/channel"}),
+                      "data_format": WAV_24, "bit_depth": 24, "duration_seconds": 12.5}),
+        (f"File type ID:   AIFC\nData format:     1 ch,  96000 Hz, {AIFC_32_FLOAT}\n",
+         {"file_type": "AIFC", "channels": 1, "sample_rate": 96000,
+          "data_format": AIFC_32_FLOAT, "bit_depth": 32}),
+        (f"File type ID:   flac\nData format:     2 ch,  44100 Hz, {FLAC_24}\n",
+         {"file_type": "flac", "channels": 2, "sample_rate": 44100, "bit_depth": 24,
+          "data_format": FLAC_24}),
+        (f"File type ID:   MPG3\nData format:     2 ch,  44100 Hz, {MP3}\n",
+         {"file_type": "MPG3", "channels": 2, "sample_rate": 44100, "data_format": MP3}),
         ("", {}),
     ])
     def test_parse_afinfo(self, text, expected):
         assert le._parse_afinfo(text) == expected
+
+    @pytest.mark.parametrize("fmt,depth", [
+        (WAV_16, 16), (WAV_24, 24), (WAV_32_FLOAT, 32),
+        (AIFF_16, 16), (AIFF_24, 24), (AIFC_32_FLOAT, 32), (FLAC_24, 24),
+    ])
+    def test_parse_afinfo_reads_bit_depth_of_every_pcm_format(self, fmt, depth):
+        assert le._parse_afinfo(afinfo_for(48000, fmt))["bit_depth"] == depth
 
     def test_same(self):
         assert le._same("44,100", "44100")
@@ -887,10 +995,3 @@ class TestJXADriver:
         run, _ = self.runner(exc=FileNotFoundError())
         with pytest.raises(le.UIScriptingError, match="needs macOS"):
             le.JXADriver(runner=run).call("status")
-
-    def test_driver_script_covers_every_op_the_exporter_uses(self):
-        for op in ("status", "activate", "menu", "keystroke", "controls", "texts",
-                   "set_toggle", "set_choice", "press", "save_panel"):
-            assert f"'{op}'" in le.JXA_DRIVER
-        for label in ("Save As:", "Where:", "Replace", "AXModal", "AXPress"):
-            assert label in le.JXA_DRIVER

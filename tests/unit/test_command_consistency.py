@@ -10,6 +10,7 @@ commands are named ``get_*`` and everything else changes Live's state.
 import inspect
 import os
 import sys
+import tempfile
 import types
 from unittest.mock import MagicMock, patch
 
@@ -54,9 +55,12 @@ _TOOL_ARGS = {
     "set_track_monitoring": {"track_index": 1, "state": "in"},
     "get_track_routing_options": {"track_index": 1},
     "set_tracks_state": {"changes": [{"track_index": 1, "mute": True}]},
-    # A folder that does not exist stops the export before any UI scripting.
-    "export_audio": {"output_path": "/nonexistent-mcp-test-dir/x.wav", "render_range": "loop"},
-    "export_video": {"output_path": "/nonexistent-mcp-test-dir/x.wav", "render_range": "loop"},
+    # The recorded reply has no arrangement clips, which stops the export
+    # after it has read the Arrangement and before any UI scripting.
+    "export_audio": {"output_path": os.path.join(tempfile.gettempdir(), "mcp-consistency.wav"),
+                     "overwrite": True},
+    "export_video": {"output_path": os.path.join(tempfile.gettempdir(), "mcp-consistency.wav"),
+                     "overwrite": True},
 }
 
 # Read commands whose names do not start with "get_".
@@ -97,7 +101,9 @@ def sent_by_tool():
             server._invalidate_external_plugin_cache()
             conn = MagicMock()
             conn.send_command.return_value = dict(_RESPONSE)
-            with patch.object(server, "get_ableton_connection", return_value=conn):
+            # The export tools only talk to Live on macOS.
+            with patch.object(server, "get_ableton_connection", return_value=conn), \
+                    patch.object(sys, "platform", "darwin"):
                 tool(MagicMock(), **_call_args(name, tool))
             sent[name] = [c.args[0] for c in conn.send_command.call_args_list]
     finally:

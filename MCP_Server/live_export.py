@@ -18,10 +18,13 @@ Flow:
    failing if it did not take.
 5. Press Export, then fill in the macOS Save panel (folder and file name).
 6. Poll until the render window is gone and the output file has stopped
-   growing, then check the file with ``afinfo``.
+   growing, then check the file with ``afinfo``: sample rate, bit depth and,
+   when the caller says how long the range should be, length.
 
 A run that cannot prove the output file was written is a failure. Nothing
-here reports success from the UI alone.
+here reports success from the UI alone. Render Start and Render Length are
+never read back from the dialog, so the file's length is the only evidence
+of which range Live rendered.
 
 The control labels come from Live 12's accessibility tree (the descriptions
 VoiceOver reads), e.g. the Sample Rate chooser is an ``AXPopUpButton``
@@ -91,6 +94,9 @@ DEFAULT_DIALOG_TIMEOUT = 15.0
 DEFAULT_RENDER_TIMEOUT = 900.0
 DEFAULT_POLL_INTERVAL = 1.0
 STABLE_POLLS = 3
+# Slack between the rendered and the expected length: covers MP3 encoder
+# padding and the dialog's sixteenth-note resolution at any normal tempo.
+LENGTH_TOLERANCE_SECONDS = 0.5
 
 
 class ExportError(Exception):
@@ -118,6 +124,8 @@ class ExportRequest:
     overwrite: bool = False
     render_timeout: float = DEFAULT_RENDER_TIMEOUT
     dialog_timeout: float = DEFAULT_DIALOG_TIMEOUT
+    # How long the rendered file should be, when the caller knows the range.
+    expected_seconds: Optional[float] = None
 
     # Filled in by validate().
     directory: str = field(default="", init=False)
@@ -188,6 +196,24 @@ class ExportRequest:
     @property
     def output_file(self) -> str:
         return self.expected_paths[0]
+
+
+def check_preconditions(request: ExportRequest, platform: Optional[str] = None) -> None:
+    """Reject a validated request that cannot work, before Live is touched."""
+    platform = platform or sys.platform
+    if platform != "darwin":
+        raise ExportError(
+            f"Live export drives the macOS UI and is not supported on '{platform}'"
+        )
+    if not os.path.isdir(request.directory):
+        raise ExportError(f"output folder does not exist: {request.directory}")
+    if not os.access(request.directory, os.W_OK | os.X_OK):
+        raise ExportError(f"output folder is not writable: {request.directory}")
+    existing = [p for p in request.expected_paths if os.path.exists(p)]
+    if existing and not request.overwrite:
+        raise ExportError(
+            f"output file already exists: {existing[0]} (pass overwrite=True to replace it)"
+        )
 
 
 def build_dialog_plan(request: ExportRequest) -> List[Dict[str, Any]]:
@@ -587,7 +613,7 @@ def _parse_afinfo(text: str) -> Dict[str, Any]:
         info["sample_rate"] = int(m.group(2))
         fmt = m.group(3).strip()
         info["data_format"] = fmt
-        depth = re.search(r"(?:Int|Float)(\d+)", fmt) or re.search(r"from (\d+)-bit source", fmt)
+        depth = re.search(r"(?:Int|Float)(\d+)", fmt) or re.search(r"(\d+)-bit", fmt)
         if depth:
             info["bit_depth"] = int(depth.group(1))
     m = re.search(r"estimated duration:\s*([\d.]+)\s*sec", text)
@@ -630,10 +656,18 @@ class LiveExporter:
             raise ExportError(f"{what}: {result.get('error') or 'failed'}")
         return result
 
+    def _status(self) -> Dict[str, Any]:
+        status = self._call("status")
+        if not status.get("ok", False):
+            raise UIScriptingError(
+                f"could not read Live's windows: {status.get('error') or 'status failed'}"
+            )
+        return status
+
     def _wait_for_window(self, title: str, timeout: float) -> bool:
         deadline = self.clock.monotonic() + timeout
         while True:
-            if title in _window_names(self._call("status")):
+            if title in _window_names(self._status()):
                 return True
             if self.clock.monotonic() >= deadline:
                 return False
@@ -647,7 +681,7 @@ class LiveExporter:
 
     def _new_window_texts(self, baseline: Sequence[str]) -> Dict[str, List[str]]:
         texts: Dict[str, List[str]] = {}
-        for name in _extra_windows(self._call("status"), baseline):
+        for name in _extra_windows(self._status(), baseline):
             try:
                 texts[name or "(untitled)"] = self._call("texts", window=name).get("texts", [])
             except ExportError:
@@ -672,6 +706,9 @@ class LiveExporter:
                 "normalize": bool(request.normalize),
                 "create_video": bool(request.create_video),
                 "expected_path": request.output_file,
+                "expected_seconds": request.expected_seconds,
+                "rendered_seconds": None,
+                "length_verified": False,
             })
             self._export(request, result)
         except (ExportError, ValueError) as e:
@@ -681,25 +718,10 @@ class LiveExporter:
         result["steps"] = self.steps
         return result
 
-    def _check_destination(self, request: ExportRequest) -> None:
-        if not os.path.isdir(request.directory):
-            raise ExportError(f"output folder does not exist: {request.directory}")
-        if not os.access(request.directory, os.W_OK | os.X_OK):
-            raise ExportError(f"output folder is not writable: {request.directory}")
-        existing = [p for p in request.expected_paths if os.path.exists(p)]
-        if existing and not request.overwrite:
-            raise ExportError(
-                f"output file already exists: {existing[0]} (pass overwrite=True to replace it)"
-            )
-
     def _export(self, request: ExportRequest, result: Dict[str, Any]) -> None:
-        if self.platform != "darwin":
-            raise ExportError(
-                f"Live export drives the macOS UI and is not supported on '{self.platform}'"
-            )
-        self._check_destination(request)
+        check_preconditions(request, self.platform)
 
-        status = self._call("status")
+        status = self._status()
         if not status.get("running"):
             raise ExportError("Ableton Live is not running")
         busy = _busy_windows(status.get("windows", []))
@@ -717,23 +739,23 @@ class LiveExporter:
         if request.select_loop:
             self._require(
                 self._call("menu", path=[EDIT_MENU, SELECT_LOOP_MENU_ITEM]),
-                "could not select the loop for the render range (show the Arrangement View)",
+                "could not select the loop for the render range (the Arrangement "
+                "must be showing and have keyboard focus)",
             )
 
-        baseline = _window_names(self._call("status"))
+        baseline = _window_names(self._status())
         opened = self._call("menu", path=[FILE_MENU, EXPORT_MENU_ITEM])
         if not opened.get("ok") and opened.get("missing"):
             # Menu item renamed or localized: fall back to the shortcut.
             self._call("keystroke", **EXPORT_SHORTCUT)
         elif not opened.get("ok"):
             raise ExportError(f"could not open the Export dialog: {opened.get('error')}")
-        if not self._wait_for_window(EXPORT_DIALOG_TITLE, request.dialog_timeout):
-            raise ExportError(
-                f"the '{EXPORT_DIALOG_TITLE}' dialog did not appear within "
-                f"{request.dialog_timeout:.0f}s"
-            )
-
         try:
+            if not self._wait_for_window(EXPORT_DIALOG_TITLE, request.dialog_timeout):
+                raise ExportError(
+                    f"the '{EXPORT_DIALOG_TITLE}' dialog did not appear within "
+                    f"{request.dialog_timeout:.0f}s"
+                )
             for step in build_dialog_plan(request):
                 self._apply(step)
             settings = self._call("controls", window=EXPORT_DIALOG_TITLE).get("controls", [])
@@ -745,19 +767,14 @@ class LiveExporter:
                 self._call("press", window=EXPORT_DIALOG_TITLE, label=EXPORT_BUTTON),
                 "could not press Export",
             )
-        except Exception:
-            self._cancel(EXPORT_DIALOG_TITLE)
-            raise
-
-        if not self._wait_for_window(SAVE_PANEL_TITLE, request.dialog_timeout):
-            texts = self._new_window_texts(baseline)
-            if texts:
-                result["dialog_text"] = texts
-            raise ExportError(
-                f"the Save panel did not appear within {request.dialog_timeout:.0f}s after Export"
-            )
-        start_wall = self.clock.now()
-        try:
+            if not self._wait_for_window(SAVE_PANEL_TITLE, request.dialog_timeout):
+                texts = self._new_window_texts(baseline)
+                if texts:
+                    result["dialog_text"] = texts
+                raise ExportError(
+                    f"the Save panel did not appear within {request.dialog_timeout:.0f}s after Export"
+                )
+            start_wall = self.clock.now()
             self._require(
                 self._call(
                     "save_panel",
@@ -833,7 +850,7 @@ class LiveExporter:
         stable = 0
         found: Optional[str] = None
         while True:
-            status = self._call("status")
+            status = self._status()
             if not status.get("running"):
                 raise ExportError("Ableton Live quit during the export")
             extra = _extra_windows(status, baseline)
@@ -883,19 +900,43 @@ class LiveExporter:
             raise ExportError(f"output file is empty: {path}")
         text = self.afinfo(path)
         if not text:
-            result["warnings"].append("afinfo unavailable; file format was not verified")
+            result["warnings"].append("afinfo unavailable; the output file was not verified")
             return
         info = _parse_afinfo(text)
         result["file_info"] = info
         if not info:
-            result["warnings"].append("could not read afinfo output; file format was not verified")
+            result["warnings"].append("could not read afinfo output; the output file was not verified")
             return
         problems = []
-        if info.get("sample_rate") and info["sample_rate"] != request.sample_rate:
-            problems.append(f"sample rate is {info['sample_rate']} Hz, expected {request.sample_rate}")
-        if (request.format != "mp3" and info.get("bit_depth")
-                and info["bit_depth"] != request.bit_depth):
-            problems.append(f"bit depth is {info['bit_depth']}, expected {request.bit_depth}")
+        unverified = []
+        rate = info.get("sample_rate")
+        if rate is None:
+            unverified.append("sample rate")
+        elif rate != request.sample_rate:
+            problems.append(f"sample rate is {rate} Hz, expected {request.sample_rate}")
+        if request.format != "mp3":
+            depth = info.get("bit_depth")
+            if depth is None:
+                unverified.append("bit depth")
+            elif depth != request.bit_depth:
+                problems.append(f"bit depth is {depth}, expected {request.bit_depth}")
+        duration = info.get("duration_seconds")
+        result["rendered_seconds"] = duration
+        if request.expected_seconds is not None:
+            if duration is None:
+                unverified.append("length")
+            elif abs(duration - request.expected_seconds) > LENGTH_TOLERANCE_SECONDS:
+                problems.append(
+                    f"it is {duration:.2f} s long, expected {request.expected_seconds:.2f} s "
+                    "for the requested range (Live rendered a different range, or the "
+                    "tempo changes inside it)"
+                )
+            else:
+                result["length_verified"] = True
+        if unverified:
+            result["warnings"].append(
+                "afinfo did not report the " + ", ".join(unverified) + "; not verified"
+            )
         if problems:
             raise ExportError(f"{path} was written but does not match the request: " + "; ".join(problems))
 

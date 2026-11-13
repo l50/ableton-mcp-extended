@@ -45,3 +45,4 @@ def test_export_writes_verified_file(tmp_path, fmt, bit_depth):
     assert out["ok"] is True, out.get("error")
     assert os.path.getsize(out["output_path"]) > 0
     assert out["file_info"]["sample_rate"] == 44100
+    assert out["length_verified"] is True, (out["expected_seconds"], out["rendered_seconds"])

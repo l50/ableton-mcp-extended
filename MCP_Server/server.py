@@ -2630,7 +2630,9 @@ def navigate_device_preset(
 #
 # Live's Export Audio/Video is not in the Live Object Model, so these tools
 # drive the dialog through macOS UI scripting (see live_export.py) instead of
-# sending a Remote Script command. Only the render range uses the LOM.
+# sending a Remote Script command. Only the render range uses the LOM: the
+# range is read there (and, for "arrangement", selected with the loop brace),
+# and its length in seconds goes to the exporter to check the file against.
 
 
 def _load_live_export_module():
@@ -2694,18 +2696,31 @@ def _run_live_export(
     ableton = None
     try:
         request.validate()
+        live_export.check_preconditions(request)
         if range_name != "selection":
             ableton = get_ableton_connection()
+            info = ableton.send_command("get_arrangement_info", {"track_index": -1})
+            transport = info.get("transport", {})
+            if transport.get("back_to_arranger"):
+                return json.dumps(_export_failure(
+                    "Session clips are overriding the Arrangement (Back to Arrangement "
+                    "is lit in Live), so the render would not be the Arrangement; click "
+                    "Back to Arrangement, or use render_range='selection' to render "
+                    "what is playing",
+                    render_range=range_name,
+                ))
             if range_name == "arrangement":
-                info = ableton.send_command("get_arrangement_info", {"track_index": -1})
-                end = _arrangement_end_beats(info)
-                if end <= 0:
+                beats = _arrangement_end_beats(info)
+                if beats <= 0:
                     return json.dumps(_export_failure(
                         "the Arrangement has no clips to render; use render_range="
                         "'loop' or 'selection' instead",
                         render_range=range_name,
                     ))
-                transport = info.get("transport", {})
+            else:
+                beats = float(transport["loop_length"])
+            request.expected_seconds = beats * 60.0 / float(transport["tempo"])
+            if range_name == "arrangement":
                 restore_loop = {
                     "enabled": bool(transport.get("loop_enabled")),
                     "start": float(transport.get("loop_start") or 0),
@@ -2714,7 +2729,7 @@ def _run_live_export(
                 # Point the loop brace at the whole Arrangement so Select Loop
                 # pre-fills Render Start/Length; the brace is restored below.
                 ableton.send_command("set_arrangement_loop", {
-                    "enabled": restore_loop["enabled"], "start": 0.0, "length": end,
+                    "enabled": restore_loop["enabled"], "start": 0.0, "length": beats,
                 })
             ableton.send_command("set_view", {"view_name": "Arranger"})
         result = live_export.export_from_live(request)
@@ -2761,14 +2776,26 @@ def export_audio(
     - render_range: "arrangement" = bar 1 to the end of the last arrangement clip
       (the loop brace is moved to select it, then restored); "loop" = the current
       loop brace; "selection" = whatever Live pre-fills (the current time selection).
+      "arrangement" and "loop" refuse to run while Session clips override the
+      Arrangement (Back to Arrangement lit).
     - normalize: Normalize the rendered file.
     - overwrite: Replace output_path if it already exists.
     - render_timeout: Seconds to wait for the render to finish.
 
     Returns JSON: {ok, status, output_path, output_files, format, sample_rate,
-    bit_depth, normalize, render_range, dialog_settings, file_info, steps,
-    warnings, error?, dialog_text?}. ok is true only when the file exists, has
-    stopped growing, and afinfo agrees on sample rate and bit depth.
+    bit_depth, normalize, render_range, expected_seconds, rendered_seconds,
+    length_verified, dialog_settings, file_info, steps, warnings, error?,
+    dialog_text?}. ok is true only when the file exists, has stopped growing,
+    and afinfo agrees on sample rate, bit depth and, for "arrangement" and
+    "loop", length.
+
+    render_range is the range that was asked for. Render Start/Length are not
+    read back from the dialog, so the only check on the range is the file's
+    length: rendered_seconds (from afinfo) against expected_seconds (the
+    range's beats at the Set's current tempo), with length_verified true when
+    they match. A Set whose tempo changes inside the range fails that check
+    even when the file is right. "selection" has no expected length and is
+    never length-verified.
     """
     return _run_live_export(
         output_path, format, sample_rate, bit_depth, render_range,
