@@ -54,6 +54,9 @@ _TOOL_ARGS = {
     "set_track_monitoring": {"track_index": 1, "state": "in"},
     "get_track_routing_options": {"track_index": 1},
     "set_tracks_state": {"changes": [{"track_index": 1, "mute": True}]},
+    # A folder that does not exist stops the export before any UI scripting.
+    "export_audio": {"output_path": "/nonexistent-mcp-test-dir/x.wav", "render_range": "loop"},
+    "export_video": {"output_path": "/nonexistent-mcp-test-dir/x.wav", "render_range": "loop"},
 }
 
 # Read commands whose names do not start with "get_".

@@ -34,5 +34,6 @@ def test_server_registers_tools_with_real_fastmcp():
     )
     assert proc.returncode == 0, proc.stderr
     tool_names = json.loads(proc.stdout.strip().splitlines()[-1])
-    for name in ("get_session_info", "set_tempo", "manage_clip_automation"):
+    for name in ("get_session_info", "set_tempo", "manage_clip_automation",
+                 "export_audio", "export_video"):
         assert name in tool_names
