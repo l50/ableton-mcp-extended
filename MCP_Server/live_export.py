@@ -226,7 +226,10 @@ def build_dialog_plan(request: ExportRequest) -> List[Dict[str, Any]]:
     Order matters: File Type and Bit Depth are only live while Encode PCM is on.
     """
     plan: List[Dict[str, Any]] = [
-        {"op": "set_choice", "label": RENDERED_TRACK, "values": list(MAIN_TRACK_VALUES)},
+        # Live's own bus leads this list and the tracks after it can have its
+        # name, so it is taken by position: the first entry, whatever is set.
+        {"op": "set_choice", "label": RENDERED_TRACK, "values": list(MAIN_TRACK_VALUES),
+         "first": True},
     ]
     if request.format in PCM_FORMATS:
         plan += [
@@ -346,7 +349,7 @@ function menuItemsOf(p) {
   }
   return items;
 }
-function pickFromMenu(p, el, values) {
+function pickFromMenu(p, el, values, firstOnly) {
   press(el);
   delay(0.6);
   var items = menuItemsOf(p);
@@ -355,11 +358,16 @@ function pickFromMenu(p, el, values) {
     var name = String(safe(function () { return items[i].name(); }, ''));
     if (!name) continue;
     seen.push(name);
-    if (matches(name, values)) { press(items[i]); delay(0.4); return seen; }
+    if (matches(name, values)) {
+      press(items[i]);
+      delay(0.4);
+      return {seen: seen, picked: name.replace(/^[\u2714\u2713]\s*/, '')};
+    }
+    if (firstOnly) break;
   }
   SE.keyCode(53);  // Esc closes the open menu, not the dialog
   delay(0.3);
-  return seen;
+  return {seen: seen, picked: null};
 }
 function controlList(w) {
   var all = w.entireContents(), out = [];
@@ -441,14 +449,25 @@ function dispatch(cmd) {
       var w = findWindow(p, cmd.window);
       var el = findControl(w, cmd.label, ['AXPopUpButton']);
       var before = String(safe(function () { return el.value(); }, ''));
-      if (matches(before, cmd.values)) return {before: before, after: before};
+      // cmd.first: only the list's first entry will do, and a later entry can
+      // have its name, so the current value says nothing.
+      if (!cmd.first && matches(before, cmd.values)) return {before: before, after: before};
       if (!safe(function () { return el.enabled(); }, true))
         return {ok: false, before: before, after: before,
                 error: "'" + cmd.label + "' is disabled in the Export dialog"};
       // Live's choosers do not accept AXValue writes; pick from the menu.
-      var seen = pickFromMenu(p, el, cmd.values);
-      var after = String(safe(function () { return el.value(); }, ''));
-      return {before: before, after: after, seen: seen.slice(0, 40)};
+      var pick = pickFromMenu(p, el, cmd.values, cmd.first);
+      var out = {before: before, after: String(safe(function () { return el.value(); }, '')),
+                 seen: pick.seen.slice(0, 40)};
+      if (pick.picked !== null) {
+        out.picked = pick.picked;
+      } else if (cmd.first) {
+        out.ok = false;
+        out.error = "the first entry in the '" + cmd.label + "' list is " +
+          (pick.seen.length ? "'" + pick.seen[0] + "'" : 'missing') +
+          ', expected ' + cmd.values.join(' or ');
+      }
+      return out;
     }
     case 'press': {
       var w = findWindow(p, cmd.window);
@@ -858,15 +877,18 @@ class LiveExporter:
                     f"'{label}' is {res.get('after')} after toggling, expected {step['on']}"
                 )
         else:
+            if step.get("first"):
+                params["first"] = True
             res = self._call("set_choice", values=step["values"], **params)
             if not res.get("ok"):
                 raise ExportError(f"could not set '{label}': {res.get('error')}")
             after = str(res.get("after", ""))
-            if not any(_same(after, v) for v in step["values"]):
+            wanted = [res.get("picked")] if step.get("first") else step["values"]
+            if not any(_same(after, v) for v in wanted):
                 seen = res.get("seen") or []
                 hint = f" (choices seen: {', '.join(seen)})" if seen else ""
                 raise ExportError(
-                    f"could not set '{label}' to {step['values'][0]}: it reads '{after}'{hint}"
+                    f"could not set '{label}' to {wanted[0]}: it reads '{after}'{hint}"
                 )
 
     def _wait_for_render(
