@@ -204,7 +204,7 @@ class FakeLive:
             c["value"] = on
         return {"ok": True, "before": before, "after": c["value"], "enabled": True}
 
-    def op_set_choice(self, window, label, values):
+    def op_set_choice(self, window, label, values, first=False):
         missing = self._window_or_error(window)
         if missing:
             return missing
@@ -212,11 +212,22 @@ class FakeLive:
             return {"ok": False, "error": f"control '{label}' not found in '{window}'"}
         c = self.controls[label]
         before = c["value"]
-        for v in values:
-            if v in c["options"]:
-                c["value"] = v
-                break
-        return {"ok": True, "before": before, "after": c["value"], "seen": list(c["options"])}
+        if not first and before in values:
+            return {"ok": True, "before": before, "after": before}
+        # Like the driver, entries are told apart by where they are in the
+        # list: its first entry when asked for that, else the first wanted name.
+        options = c["options"][:1] if first else c["options"]
+        index = next((i for i, o in enumerate(options) if o in values), None)
+        if index is None:
+            reply = {"ok": True, "before": before, "after": before, "seen": list(options)}
+            if first:
+                reply.update(ok=False, error=f"the first entry in the '{label}' list is "
+                                             f"'{options[0]}', expected " + " or ".join(values))
+            return reply
+        if label not in self.b.get("stuck_choices", ()):
+            c["value"], c["index"] = options[index], index
+        return {"ok": True, "before": before, "after": c["value"],
+                "seen": options[:index + 1], "picked": options[index]}
 
     def op_controls(self, window):
         out = []
@@ -386,7 +397,8 @@ class TestDialogPlan:
     def test_pcm_plan(self, tmp_path):
         r = request(tmp_path, bit_depth=16, sample_rate=96000, normalize=True).validate()
         assert le.build_dialog_plan(r) == [
-            {"op": "set_choice", "label": "Rendered Track Chooser", "values": ["Main", "Master"]},
+            {"op": "set_choice", "label": "Rendered Track Chooser", "values": ["Main", "Master"],
+             "first": True},
             {"op": "set_toggle", "label": "Encode PCM", "on": True},
             {"op": "set_choice", "label": "File Type", "values": ["WAV"]},
             {"op": "set_choice", "label": "Recording Bit Depth", "values": ["16"]},
@@ -411,6 +423,12 @@ class TestDialogPlan:
         assert {"op": "set_toggle", "label": "Encode PCM", "on": False} in plan
         assert "File Type" not in labels and "Recording Bit Depth" not in labels
         assert labels.index("Encode MP3") < labels.index("Encode PCM")
+
+    @pytest.mark.parametrize("fmt", le.FORMATS)
+    def test_only_rendered_track_is_taken_by_position(self, tmp_path, fmt):
+        r = request(tmp_path, name="x", format=fmt).validate()
+        by_position = [s["label"] for s in le.build_dialog_plan(r) if s.get("first")]
+        assert by_position == ["Rendered Track Chooser"]
 
     def test_video_plan(self, tmp_path):
         r = request(tmp_path, create_video=True).validate()
@@ -499,6 +517,29 @@ class TestExportSuccess:
         assert [s.get("clicked") for s in result["steps"] if s["op"] == "menu"] == [
             "Arrangement View", "Select Loop", "Export Audio/Video...",
         ]
+
+    @pytest.mark.parametrize("track_name", ["Master", "Main"])
+    def test_rendered_track_ends_on_the_top_entry_not_a_track_of_that_name(self, tmp_path, clock, track_name):
+        # Regression: a track named like Live's bus was selected, the chooser
+        # read a wanted name, and that one track was rendered as the Main mix.
+        live, exporter = make(clock)
+        options = ["Main", "All Individual Tracks", "Selected Tracks Only", "1 Audio", track_name]
+        live.controls[le.RENDERED_TRACK] = {"kind": "choice", "value": track_name, "index": 4,
+                                            "options": options}
+        result = exporter.run(request(tmp_path))
+        assert result["ok"] is True, result
+        assert live.controls[le.RENDERED_TRACK]["index"] == 0
+        assert result["dialog_settings"]["Rendered Track Chooser"] == "Main"
+        chosen = {c["label"]: c.get("first", False) for c in live.driven("set_choice")}
+        assert chosen == {"Rendered Track Chooser": True, "File Type": False,
+                          "Recording Bit Depth": False, "Sample Rate": False}
+
+    def test_other_choosers_already_on_the_wanted_value_are_left_alone(self, tmp_path, clock):
+        live, exporter = make(clock)
+        live.controls[le.SAMPLE_RATE]["value"] = "48000"
+        result = exporter.run(request(tmp_path))
+        assert result["ok"] is True, result
+        assert "index" not in live.controls[le.SAMPLE_RATE]
 
     def test_missing_menu_item_falls_back_to_shortcut(self, tmp_path, clock):
         live, exporter = make(clock, export_menu="missing")
@@ -708,6 +749,30 @@ class TestExportFailure:
                                     "could not set 'Sample Rate' to 48000: it reads '44100'")
         assert "choices seen: 44100" in result["error"]
         assert live.driven("press")[-1]["label"] == "Cancel"
+
+    def test_rendered_track_list_not_led_by_the_main_bus(self, tmp_path, clock):
+        live, exporter = make(clock)
+        live.controls[le.RENDERED_TRACK] = {"kind": "choice", "value": "Main", "index": 2,
+                                            "options": ["All Individual Tracks", "1 Audio", "Main"]}
+        self.assert_failed(
+            exporter.run(request(tmp_path)),
+            "could not set 'Rendered Track Chooser': the first entry in the 'Rendered Track "
+            "Chooser' list is 'All Individual Tracks', expected Main or Master")
+        # The track named Main further down is neither accepted nor chosen.
+        assert live.controls[le.RENDERED_TRACK]["index"] == 2
+        assert live.driven("press")[-1]["label"] == "Cancel"
+        assert "save_panel" not in live.ops()
+
+    def test_rendered_track_still_on_a_track_after_choosing_the_top_entry(self, tmp_path, clock):
+        # The chooser is read back against the entry that was pressed, so a
+        # track named Master that stayed selected does not pass for Main.
+        live, exporter = make(clock, stuck_choices=(le.RENDERED_TRACK,))
+        live.controls[le.RENDERED_TRACK] = {"kind": "choice", "value": "Master", "index": 2,
+                                            "options": ["Main", "1 Audio", "Master"]}
+        self.assert_failed(exporter.run(request(tmp_path)),
+                           "could not set 'Rendered Track Chooser' to Main: it reads 'Master'")
+        assert live.driven("press")[-1]["label"] == "Cancel"
+        assert "save_panel" not in live.ops()
 
     def test_control_not_found(self, tmp_path, clock):
         live, exporter = make(clock, missing_controls=(le.FILE_TYPE,))

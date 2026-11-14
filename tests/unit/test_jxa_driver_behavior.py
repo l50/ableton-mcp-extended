@@ -68,14 +68,17 @@ function byDesc(desc) {
 var ACTIONS = {
   openMenu: function (popup) {
     var menu = mk({role: 'AXWindow', subrole: 'AXUnknown', name: '', kids: [
-      {role: 'AXGroup', description: 'menu', kids: popup.spec.options.map(function (opt) {
+      {role: 'AXGroup', description: 'menu', kids: popup.spec.options.map(function (opt, i) {
+        var current = popup.spec.selected === undefined ? opt === popup.spec.value : i === popup.spec.selected;
         return {role: 'AXMenuItem', description: 'menu item', target: popup.spec.description,
-                name: (opt === popup.spec.value ? '✔ ' : '') + opt, press: 'choose'};
+                index: i, name: (current ? '✔ ' : '') + opt, press: 'choose'};
       })}]});
     windows.unshift(menu);
   },
   choose: function (item) {
-    byDesc(item.spec.target).spec.value = item.spec.name.replace(/^✔ /, '');
+    var popup = byDesc(item.spec.target);
+    popup.spec.value = item.spec.name.replace(/^✔ /, '');
+    popup.spec.selected = item.spec.index;
     windows = windows.filter(function (w) {
       return !w.entireContents().some(function (c) { return c.role() === 'AXMenuItem'; });
     });
@@ -119,8 +122,10 @@ var reply = JSON.parse(run([process.argv[1]]));
 reply._log = LOG;
 reply._windows = windows.map(function (w) { return [w.name(), w.subrole()]; });
 reply._values = {};
+reply._selected = {};
 windows.forEach(function (w) { w.entireContents().forEach(function (c) {
-  if (c.spec.description && c.spec.value !== undefined) reply._values[c.spec.description] = c.spec.value; }); });
+  if (c.spec.description && c.spec.value !== undefined) reply._values[c.spec.description] = c.spec.value;
+  if (c.spec.selected !== undefined) reply._selected[c.spec.description] = c.spec.selected; }); });
 console.log(JSON.stringify(reply));
 """
 
@@ -268,3 +273,75 @@ def test_menu_reports_a_missing_item_and_a_missing_menu():
     reply = drive("menu", menu_world(), path=["View", "Arrangement View"])
     assert reply["ok"] is False
     assert reply["_log"]["clicked"] == []
+
+
+TRACK_LIST = ["Main", "All Individual Tracks", "Selected Tracks Only", "1 Audio", "Master"]
+
+
+def rendered_track_world(options, selected, opens=True):
+    """The Export dialog with the Rendered Track list as Live 12.4.5 orders it:
+    Live's own bus first, then the track modes, then every track by name."""
+    world = export_dialog_world()
+    chooser = {"role": "AXPopUpButton", "description": "Rendered Track Chooser",
+               "value": options[selected], "selected": selected, "options": options}
+    if opens:
+        chooser["press"] = "openMenu"
+    world["windows"][0]["kids"].insert(0, chooser)
+    return world
+
+
+def choose_main(world):
+    return drive("set_choice", world, window="Export Audio/Video",
+                 label="Rendered Track Chooser", values=["Main", "Master"], first=True)
+
+
+def test_set_choice_first_takes_the_top_entry_when_a_track_named_master_is_selected():
+    # Regression: the chooser read "Master", a wanted name, so nothing was
+    # pressed and that one track was rendered instead of Live's Main bus.
+    reply = choose_main(rendered_track_world(TRACK_LIST, selected=4))
+    assert reply["ok"] is True, reply
+    assert (reply["before"], reply["after"], reply["picked"]) == ("Master", "Main", "Main")
+    assert reply["_selected"]["Rendered Track Chooser"] == 0
+    assert reply["seen"] == ["Main"]
+    assert reply["_log"]["pressed"] == ["Rendered Track Chooser", "menu item"]
+    assert len(reply["_windows"]) == 3
+
+
+def test_set_choice_first_takes_the_top_entry_when_a_track_named_main_is_selected():
+    options = ["Main", "All Individual Tracks", "Selected Tracks Only", "Main"]
+    reply = choose_main(rendered_track_world(options, selected=3))
+    assert reply["ok"] is True, reply
+    assert (reply["before"], reply["after"], reply["picked"]) == ("Main", "Main", "Main")
+    assert reply["_selected"]["Rendered Track Chooser"] == 0
+
+
+def test_set_choice_first_presses_the_top_entry_even_when_it_is_already_checked():
+    reply = choose_main(rendered_track_world(TRACK_LIST, selected=0))
+    assert reply["ok"] is True, reply
+    assert reply["seen"] == ["✔ Main"]
+    assert reply["picked"] == "Main"
+    assert reply["_selected"]["Rendered Track Chooser"] == 0
+    assert reply["_log"]["pressed"] == ["Rendered Track Chooser", "menu item"]
+
+
+def test_set_choice_first_refuses_a_wanted_name_that_is_not_the_top_entry():
+    options = ["Selected Tracks Only", "Main", "Master"]
+    reply = choose_main(rendered_track_world(options, selected=2))
+    assert reply["ok"] is False
+    assert reply["error"] == ("the first entry in the 'Rendered Track Chooser' list is "
+                              "'Selected Tracks Only', expected Main or Master")
+    assert "picked" not in reply
+    assert reply["_selected"]["Rendered Track Chooser"] == 2
+    # only the chooser was pressed; Esc closed its list and left the dialog open
+    assert reply["_log"]["pressed"] == ["Rendered Track Chooser"]
+    assert reply["_log"]["keys"] == [53]
+    assert ["Export Audio/Video", "AXDialog"] in reply["_windows"]
+    assert len(reply["_windows"]) == 3
+
+
+def test_set_choice_first_fails_when_the_list_does_not_open():
+    reply = choose_main(rendered_track_world(TRACK_LIST, selected=4, opens=False))
+    assert reply["ok"] is False
+    assert reply["error"] == ("the first entry in the 'Rendered Track Chooser' list is "
+                              "missing, expected Main or Master")
+    assert reply["_selected"]["Rendered Track Chooser"] == 4
