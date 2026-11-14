@@ -154,8 +154,9 @@ class AbletonConnection:
     def send_command(self, command_type: str, params: dict[str, Any] | None = None) -> Any:
         """Send one command to Live and return its ``result`` payload.
 
-        Any failure drops the socket so the next call reconnects, and is
-        raised as an AbletonError whose message the tools pass on verbatim.
+        Raises ConnectionError when the socket cannot be opened. Any later
+        failure drops the socket so the next call reconnects, and is raised
+        as an AbletonError whose message the tools pass on verbatim.
         """
         if not self.sock and not self.connect():
             raise ConnectionError("Not connected to Ableton")

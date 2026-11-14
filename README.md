@@ -195,7 +195,7 @@ Example mcp-config.json:
   "mcpServers": {
     "AbletonMCP": {
       "command": "python",
-      "args": ["/path/to/ableton-mcp-extended/server.py"]
+      "args": ["/path/to/ableton-mcp-extended/MCP_Server/server.py"]
     },
     "ElevenLabs": {
       "command": "python",
@@ -295,6 +295,15 @@ uv run --extra test python -m pytest --cov
 ```
 
 `--cov` measures `MCP_Server` and `AbletonMCP_Remote_Script` and fails the run if total coverage drops below the `fail_under` value in `pyproject.toml`. Tests marked `integration` need a running Live instance and are skipped by default.
+
+### Linting
+
+`ruff` lints and formats the MCP server package. The rules, and the files they cover, are set under `[tool.ruff]` in `pyproject.toml`:
+
+```bash
+uv run --extra dev ruff check
+uv run --extra dev ruff format --check
+```
 
 ---
 

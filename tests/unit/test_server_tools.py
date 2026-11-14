@@ -1,4 +1,4 @@
-"""Table-driven unit tests for the MCP tool layer in MCP_Server/server.py.
+"""Table-driven unit tests for the MCP tool layer in MCP_Server/tools/.
 
 Every tool is called with ``get_ableton_connection`` patched to a fake that
 records the command and params sent over the socket and replays scripted
