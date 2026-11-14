@@ -89,6 +89,10 @@ def default_controls():
     }
 
 
+def fake_window(name, subrole="AXDialog", modal=False, texts=()):
+    return {"name": name, "subrole": subrole, "modal": modal, "sheets": 0, "texts": list(texts)}
+
+
 class FakeLive:
     """A scripted stand-in for Live's UI, driven through JXADriver's ops."""
 
@@ -97,7 +101,8 @@ class FakeLive:
         self.calls = []
         self.running = True
         self.frontmost = False
-        self.windows = [{"name": "My Song", "subrole": "AXStandardWindow", "modal": False, "sheets": 0}]
+        self.arrangement_focused = False
+        self.windows = [fake_window("My Song", "AXStandardWindow")]
         self.controls = default_controls()
         self.render_bytes = b"RIFF" + b"\0" * 64
         self.render_polls = 1          # status polls before the file appears
@@ -106,8 +111,12 @@ class FakeLive:
         self._rendering = None
 
     # helpers
-    def open_window(self, name, modal=False):
-        self.windows.insert(0, {"name": name, "subrole": "AXDialog", "modal": modal, "sheets": 0})
+    def open_window(self, name, subrole="AXDialog", modal=False, texts=None):
+        if texts is None:
+            texts = self.b.get("window_texts", {}).get(name, [])
+        opened = fake_window(name, subrole, modal, texts)
+        self.windows.insert(0, opened)
+        return opened
 
     def close_window(self, name):
         self.windows = [w for w in self.windows if w["name"] != name]
@@ -139,7 +148,8 @@ class FakeLive:
         if not self.running:
             return {"ok": True, "running": False, "frontmost": False, "windows": []}
         return {"ok": True, "running": True, "frontmost": self.frontmost,
-                "windows": [dict(w) for w in self.windows]}
+                "windows": [{k: w[k] for k in ("name", "subrole", "modal", "sheets")}
+                            for w in self.windows]}
 
     def op_activate(self):
         self.frontmost = self.b.get("comes_to_front", True)
@@ -155,7 +165,16 @@ class FakeLive:
             if self.b.get("dialog_appears", True):
                 self.open_window(le.EXPORT_DIALOG_TITLE)
             return {"ok": True, "clicked": "Export Audio/Video..."}
-        if self.b.get("select_loop_disabled"):
+        if path[0] == le.NAVIGATE_MENU:
+            state = self.b.get("arrangement_focus", "ok")
+            if state == "missing":
+                return {"ok": False, "missing": True, "error": "menu item 'Navigate > Arrangement View' not found"}
+            if state == "disabled":
+                return {"ok": False, "disabled": True, "error": "menu item 'Navigate > Arrangement View' is disabled"}
+            self.arrangement_focused = True
+            return {"ok": True, "clicked": "Arrangement View"}
+        # Live only enables Select Loop while the Arrangement has keyboard focus.
+        if not self.arrangement_focused or self.b.get("select_loop_disabled"):
             return {"ok": False, "disabled": True, "error": "menu item 'Edit > Select Loop' is disabled"}
         return {"ok": True, "clicked": "Select Loop"}
 
@@ -212,10 +231,9 @@ class FakeLive:
         return {"ok": True, "controls": out}
 
     def op_texts(self, window):
-        texts = self.b.get("window_texts", {}).get(window)
-        if texts is None:
-            return {"ok": False, "error": f"Live window '{window}' is not open"}
-        return {"ok": True, "texts": texts}
+        # Like the driver: the text of every window with this name.
+        return {"ok": True, "texts": [t for w in self.windows if w["name"] == window
+                                      for t in w["texts"]]}
 
     def op_press(self, window, label):
         missing = self._window_or_error(window)
@@ -231,8 +249,7 @@ class FakeLive:
                 self.open_window(le.SAVE_PANEL_TITLE, modal=True)
             elif self.b.get("error_window"):
                 name, texts = self.b["error_window"]
-                self.open_window(name)
-                self.b.setdefault("window_texts", {})[name] = texts
+                self.open_window(name, texts=texts)
             return {"ok": True, "pressed": label}
         return {"ok": False, "error": f"unexpected press {label}"}
 
@@ -242,12 +259,12 @@ class FakeLive:
         self.close_window(le.SAVE_PANEL_TITLE)
         if not self.b.get("dialog_lingers"):
             self.close_window(le.EXPORT_DIALOG_TITLE)
-        if self.b.get("progress_window", True):
-            self.windows.insert(0, {"name": "", "subrole": "AXUnknown", "modal": False, "sheets": 0})
         ext = self.b.get("written_ext", ".wav")
         self._rendering = {
             "path": os.path.join(directory, filename + ext),
             "polls": 0,
+            "progress": self.open_window("", subrole="AXUnknown"),
+            "alerted": False,
         }
         return {"ok": True, "where": folder_name, "replaced": bool(replace)}
 
@@ -258,10 +275,10 @@ class FakeLive:
             self.running = False
             return
         if self.b.get("render_error"):
-            name, texts = self.b["render_error"]
-            if name not in self.names():
-                self.open_window(name)
-            self.b.setdefault("window_texts", {})[name] = texts
+            if not r["alerted"]:
+                name, texts = self.b["render_error"]
+                self.open_window(name, texts=texts)
+                r["alerted"] = True
             return
         if r["polls"] >= self.render_polls and not self.b.get("never_writes"):
             if r["polls"] == self.render_polls:
@@ -274,7 +291,7 @@ class FakeLive:
                     os.utime(path, (self.clock.now(), self.clock.now()))
             if not self.b.get("window_stays") and r["polls"] >= self.render_polls + 1:
                 self.windows = [w for w in self.windows
-                                if w["name"] not in ("", le.EXPORT_DIALOG_TITLE)]
+                                if w is not r["progress"] and w["name"] != le.EXPORT_DIALOG_TITLE]
 
 
 @pytest.fixture
@@ -470,12 +487,17 @@ class TestExportSuccess:
         assert result["ok"] is True, result
         assert result["output_path"] == str(tmp_path / "song.aif")
 
-    def test_loop_range_selects_loop_before_opening_dialog(self, tmp_path, clock):
+    def test_loop_range_focuses_arrangement_then_selects_loop_then_opens_dialog(self, tmp_path, clock):
+        # The fake, like Live, keeps Select Loop disabled until the Arrangement
+        # has keyboard focus, so the export only works in this order.
         live, exporter = make(clock)
         result = exporter.run(request(tmp_path, select_loop=True))
         assert result["ok"] is True, result
         assert [m["path"] for m in live.driven("menu")] == [
-            ["Edit", "Select Loop"], ["File", "Export Audio/Video"],
+            ["Navigate", "Arrangement View"], ["Edit", "Select Loop"], ["File", "Export Audio/Video"],
+        ]
+        assert [s.get("clicked") for s in result["steps"] if s["op"] == "menu"] == [
+            "Arrangement View", "Select Loop", "Export Audio/Video...",
         ]
 
     def test_missing_menu_item_falls_back_to_shortcut(self, tmp_path, clock):
@@ -566,10 +588,20 @@ class TestExportSuccess:
         live, exporter = make(clock)
         # An untitled window was already open; the progress window is also
         # untitled, so the render must still be tracked by count.
-        live.windows.append({"name": "", "subrole": "AXUnknown", "modal": False, "sheets": 0})
+        live.windows.append(fake_window("", "AXUnknown"))
         live.render_polls = 2
         result = exporter.run(request(tmp_path))
         assert result["ok"] is True, result
+        assert live.names() == ["My Song", ""]
+
+    def test_text_an_untitled_window_already_showed_is_not_a_live_error(self, tmp_path, clock):
+        live, exporter = make(clock)
+        # Every untitled window is read during the render, this one included;
+        # what it said before the export started is not Live reporting on it.
+        live.windows.append(fake_window("", "AXUnknown", texts=["Could not connect to Push"]))
+        result = exporter.run(request(tmp_path))
+        assert result["ok"] is True, result
+        assert "dialog_text" not in result
 
 
 class TestExportFailure:
@@ -628,10 +660,27 @@ class TestExportFailure:
         self.assert_failed(exporter.run(request(tmp_path)), "export needs Live frontmost")
         assert "menu" not in live.ops()
 
+    @pytest.mark.parametrize("state,reason", [
+        ("missing", "menu item 'Navigate > Arrangement View' not found"),
+        ("disabled", "menu item 'Navigate > Arrangement View' is disabled"),
+    ])
+    def test_arrangement_focus_unavailable(self, tmp_path, clock, state, reason):
+        live, exporter = make(clock, arrangement_focus=state)
+        self.assert_failed(exporter.run(request(tmp_path, select_loop=True)),
+                           "could not give the Arrangement keyboard focus: " + reason)
+        # Neither the loop is selected nor the dialog opened on an unfocused view.
+        assert [m["path"] for m in live.driven("menu")] == [["Navigate", "Arrangement View"]]
+        assert le.EXPORT_DIALOG_TITLE not in live.names()
+
     def test_select_loop_unavailable(self, tmp_path, clock):
         live, exporter = make(clock, select_loop_disabled=True)
         self.assert_failed(exporter.run(request(tmp_path, select_loop=True)),
-                           "could not select the loop")
+                           "could not select the loop for the render range: "
+                           "menu item 'Edit > Select Loop' is disabled")
+        assert [m["path"] for m in live.driven("menu")] == [
+            ["Navigate", "Arrangement View"], ["Edit", "Select Loop"],
+        ]
+        assert le.EXPORT_DIALOG_TITLE not in live.names()
 
     def test_export_menu_disabled(self, tmp_path, clock):
         live, exporter = make(clock, export_menu="disabled")
@@ -691,6 +740,14 @@ class TestExportFailure:
         result = self.assert_failed(exporter.run(request(tmp_path)), "Save panel did not appear")
         assert result["dialog_text"]["Alert"] == ["Not enough disk space to render."]
 
+    def test_save_panel_never_appears_surfaces_untitled_alert_beside_older_untitled_window(
+            self, tmp_path, clock):
+        live, exporter = make(clock, save_panel_appears=False,
+                              error_window=("", ["Not enough disk space to render."]))
+        live.windows.append(fake_window("", "AXUnknown", texts=["Info View"]))
+        result = self.assert_failed(exporter.run(request(tmp_path)), "Save panel did not appear")
+        assert result["dialog_text"]["(untitled)"] == ["Not enough disk space to render."]
+
     def test_save_panel_never_appears_cancels_export_dialog(self, tmp_path, clock):
         live, exporter = make(clock, save_panel_appears=False)
         self.assert_failed(exporter.run(request(tmp_path)), "Save panel did not appear")
@@ -744,6 +801,17 @@ class TestExportFailure:
         live, exporter = make(clock, render_error=("Live", [message]))
         result = self.assert_failed(exporter.run(request(tmp_path)), message)
         assert result["dialog_text"] == {"Live": [message]}
+
+    def test_untitled_live_error_is_read_beside_an_older_untitled_window(self, tmp_path, clock):
+        # Live's alert is untitled, like the progress window and like a window
+        # that was open before the export; it must not wait out the timeout.
+        message = "The file could not be written: permission denied."
+        live, exporter = make(clock, render_error=("", [message]))
+        live.windows.append(fake_window("", "AXUnknown", texts=["Info View"]))
+        result = self.assert_failed(exporter.run(request(tmp_path)),
+                                    "Live reported an error during export: " + message)
+        assert result["dialog_text"] == {"(untitled)": [message]}
+        assert clock.sleeps < 5
 
     def test_progress_text_is_not_an_error(self, tmp_path, clock):
         live, exporter = make(clock, window_texts={"": ["Rendering audio..."]})
