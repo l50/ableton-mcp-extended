@@ -5,13 +5,11 @@ the Live API. Used by MCP tools to resolve user-friendly names
 before sending commands to the Remote Script.
 """
 
-from typing import Optional, Dict
-
 # Registry of known plugins with friendly parameter aliases and categories.
 # Each plugin entry has:
 #   "aliases": {friendly_name: real_param_name}
 #   "categories": {category_name: [param_name_prefixes]}
-KNOWN_PLUGINS: Dict[str, dict] = {
+KNOWN_PLUGINS: dict[str, dict] = {
     "Serum": {
         "aliases": {
             "wavetable position": "Osc A WT Pos",
@@ -67,7 +65,7 @@ KNOWN_PLUGINS: Dict[str, dict] = {
 }
 
 
-def resolve_alias(device_name: str, friendly_name: str) -> Optional[str]:
+def resolve_alias(device_name: str, friendly_name: str) -> str | None:
     """Resolve a friendly parameter name to the real parameter name.
 
     Returns the real parameter name if found, or None if no alias exists.
@@ -84,7 +82,7 @@ def resolve_alias(device_name: str, friendly_name: str) -> Optional[str]:
     return None
 
 
-def get_categories(device_name: str) -> Optional[Dict[str, list]]:
+def get_categories(device_name: str) -> dict[str, list] | None:
     """Get category definitions for a known plugin.
 
     Returns a dict of {category_name: [param_name_prefixes]},
@@ -96,7 +94,7 @@ def get_categories(device_name: str) -> Optional[Dict[str, list]]:
     return profile.get("categories")
 
 
-def get_alias_for_param(device_name: str, param_name: str) -> Optional[str]:
+def get_alias_for_param(device_name: str, param_name: str) -> str | None:
     """Get the friendly alias for a real parameter name.
 
     Returns the friendly alias if found, or None.
@@ -111,7 +109,7 @@ def get_alias_for_param(device_name: str, param_name: str) -> Optional[str]:
     return None
 
 
-def _find_profile(device_name: str) -> Optional[dict]:
+def _find_profile(device_name: str) -> dict | None:
     """Find a plugin profile by device name (case-insensitive contains)."""
     name_lower = device_name.lower()
     for plugin_name, profile in KNOWN_PLUGINS.items():

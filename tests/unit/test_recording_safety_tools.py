@@ -22,23 +22,23 @@ sys.modules['mcp.server.fastmcp'] = _mock_fastmcp
 _ROOT = os.path.join(os.path.dirname(__file__), '..', '..')
 sys.path.insert(0, _ROOT)
 
-from MCP_Server import server  # noqa: E402
-from MCP_Server.server import (  # noqa: E402
-    _one_based_track_indices,
-    _ok_json,
-    _parse_return_track,
-    _track_ref_params,
+from MCP_Server import connection, tools  # noqa: E402
+from MCP_Server.tools.recording import (  # noqa: E402
     get_recording_status,
-    get_track_info,
     get_track_routing_options,
     list_tracks,
+    ok_json,
+    one_based_track_indices,
+    parse_return_track,
     set_track_arm,
     set_track_input,
     set_track_monitoring,
     set_track_mute,
     set_track_solo,
     set_tracks_state,
+    track_ref_params,
 )
+from MCP_Server.tools.tracks import get_track_info  # noqa: E402
 from tests.unit.test_recording_safety_remote import (  # noqa: E402
     AUTO,
     _Track as _RemoteTrack,
@@ -49,7 +49,7 @@ from tests.unit.test_recording_safety_remote import (  # noqa: E402
 
 @pytest.fixture
 def ableton():
-    with patch('MCP_Server.server.get_ableton_connection') as mock_conn:
+    with patch('MCP_Server.connection.get_ableton_connection') as mock_conn:
         conn = MagicMock()
         mock_conn.return_value = conn
         yield conn
@@ -66,52 +66,52 @@ class TestHelpers:
         ("", None), (None, None), ("  ", None),
     ])
     def test_parse_return_track(self, value, expected):
-        assert _parse_return_track(value) == expected
+        assert parse_return_track(value) == expected
 
     @pytest.mark.parametrize("value", ["0", "AB", "?", "-1"])
     def test_parse_return_track_rejects(self, value):
         with pytest.raises(ValueError) as excinfo:
-            _parse_return_track(value)
+            parse_return_track(value)
         assert "letter (A, B, ...) or a 1-based number" in str(excinfo.value)
 
     def test_track_ref_by_index(self):
-        assert _track_ref_params(3) == {"track_index": 2}
+        assert track_ref_params(3) == {"track_index": 2}
 
     def test_track_ref_by_name_with_expect_name(self):
-        assert _track_ref_params(0, "Gtr", "", "Gtr") == {
+        assert track_ref_params(0, "Gtr", "", "Gtr") == {
             "track_name": "Gtr", "expect_name": "Gtr"}
 
     def test_track_ref_by_return(self):
-        assert _track_ref_params(0, "", "B") == {"return_track_index": 1}
+        assert track_ref_params(0, "", "B") == {"return_track_index": 1}
 
     @pytest.mark.parametrize("args", [(0, "", ""), (1, "Gtr", ""),
                                       (0, "Gtr", "A")])
     def test_track_ref_needs_exactly_one(self, args):
         with pytest.raises(ValueError) as excinfo:
-            _track_ref_params(*args)
+            track_ref_params(*args)
         assert "exactly one of track_index (1-based)" in str(excinfo.value)
 
     def test_track_ref_rejects_negative_index(self):
         with pytest.raises(ValueError):
-            _track_ref_params(-2)
+            track_ref_params(-2)
 
     def test_one_based_track_indices(self):
         value = {"index": 0, "flag": True, "nested": [{"index": 4},
                                                      {"index": None}],
                  "track": {"index": True}}
-        assert _one_based_track_indices(value) == {
+        assert one_based_track_indices(value) == {
             "index": 1, "flag": True, "nested": [{"index": 5},
                                                  {"index": None}],
             "track": {"index": True}}
 
     def test_ok_json_is_compact(self):
-        text = _ok_json({"track": {"index": 0, "name": "Gtr"}})
+        text = ok_json({"track": {"index": 0, "name": "Gtr"}})
         assert text == ('{"ok":true,"track":{"index":1,"name":"Gtr"},'
                         '"warnings":[]}')
 
     def test_ok_json_keeps_warnings_and_handles_none(self):
-        assert json.loads(_ok_json({"warnings": ["x"]}))["warnings"] == ["x"]
-        assert json.loads(_ok_json(None)) == {"ok": True, "warnings": []}
+        assert json.loads(ok_json({"warnings": ["x"]}))["warnings"] == ["x"]
+        assert json.loads(ok_json(None)) == {"ok": True, "warnings": []}
 
 
 class TestMuteSolo:
@@ -378,7 +378,7 @@ class TestCommandRegistration:
 
     @staticmethod
     def _send(command):
-        conn = server.AbletonConnection(host="localhost", port=0)
+        conn = connection.AbletonConnection(host="localhost", port=0)
         conn.sock = MagicMock()
         conn.receive_full_response = MagicMock(
             return_value=b'{"status": "success", "result": {"done": true}}')
@@ -400,6 +400,6 @@ class TestCommandRegistration:
         sock.settimeout.assert_called_once_with(10.0)
         sleep.assert_not_called()
 
-    def test_server_module_exposes_every_tool(self):
+    def test_recording_module_exposes_every_tool(self):
         for name in self.WRITES + self.READS:
-            assert callable(getattr(server, name)), name
+            assert callable(getattr(tools.recording, name)), name

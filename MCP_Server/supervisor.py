@@ -30,6 +30,7 @@ Set ``ABLETON_MCP_NO_SUPERVISOR=1`` to run the server in-process as before, and
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -39,7 +40,7 @@ import sys
 import threading
 import time
 from logging.handlers import RotatingFileHandler
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 LOG_ENV = "ABLETON_MCP_LOG"
 NO_SUPERVISOR_ENV = "ABLETON_MCP_NO_SUPERVISOR"
@@ -82,8 +83,9 @@ def setup_file_logging(name: str) -> logging.Logger:
     return logger
 
 
-def install_signal_logging(logger: logging.Logger, signals=(signal.SIGTERM, signal.SIGHUP),
-                           before_exit=None) -> None:
+def install_signal_logging(
+    logger: logging.Logger, signals=(signal.SIGTERM, signal.SIGHUP), before_exit=None
+) -> None:
     """Log which signal killed us (and who our parent is) before dying."""
 
     def handler(signum, _frame):
@@ -93,29 +95,23 @@ def install_signal_logging(logger: logging.Logger, signals=(signal.SIGTERM, sign
             name = str(signum)
         logger.warning("received %s (ppid=%s) -- exiting", name, os.getppid())
         for h in logger.handlers:
-            try:
+            with contextlib.suppress(Exception):
                 h.flush()
-            except Exception:
-                pass
         if before_exit is not None:
-            try:
+            with contextlib.suppress(Exception):
                 before_exit(signum)
-            except Exception:
-                pass
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)
 
     for sig in signals:
-        try:
+        with contextlib.suppress(ValueError, OSError):
             signal.signal(sig, handler)
-        except (ValueError, OSError):
-            pass
 
 
 # ── supervisor ──────────────────────────────────────────────────────
 
 
-def _parse(line: bytes) -> Optional[Dict[str, Any]]:
+def _parse(line: bytes) -> dict[str, Any] | None:
     try:
         msg = json.loads(line)
     except (ValueError, UnicodeDecodeError):
@@ -123,16 +119,16 @@ def _parse(line: bytes) -> Optional[Dict[str, Any]]:
     return msg if isinstance(msg, dict) else None
 
 
-def _is_response(msg: Dict[str, Any]) -> bool:
+def _is_response(msg: dict[str, Any]) -> bool:
     return "id" in msg and ("result" in msg or "error" in msg)
 
 
-def _is_request(msg: Dict[str, Any]) -> bool:
+def _is_request(msg: dict[str, Any]) -> bool:
     return "id" in msg and "method" in msg
 
 
 class Supervisor:
-    def __init__(self, worker_cmd: List[str], logger: logging.Logger, cwd: Optional[str] = None):
+    def __init__(self, worker_cmd: list[str], logger: logging.Logger, cwd: str | None = None):
         self.cmd = worker_cmd
         self.cwd = cwd
         self.log = logger
@@ -142,16 +138,16 @@ class Supervisor:
         self.out_lock = threading.Lock()
 
         self.state = threading.Condition()  # guards everything below
-        self.proc: Optional[subprocess.Popen] = None
+        self.proc: subprocess.Popen | None = None
         self.generation = 0
         self.replaying = False
         self.stopping = False
-        self.pending: Dict[Any, bool] = {}  # request ids forwarded to the live worker, unanswered
-        self.exit_times: List[float] = []
+        self.pending: dict[Any, bool] = {}  # request ids forwarded to the live worker, unanswered
+        self.exit_times: list[float] = []
 
-        self.init_request: Optional[bytes] = None
+        self.init_request: bytes | None = None
         self.init_id: Any = None
-        self.initialized_notice: Optional[bytes] = None
+        self.initialized_notice: bytes | None = None
         self.handshake_done = threading.Event()
 
     # ── host side ──
@@ -168,11 +164,15 @@ class Supervisor:
                 pass
 
     def fail_request(self, req_id: Any, message: str) -> None:
-        self.write_host(json.dumps({
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "error": {"code": -32000, "message": message},
-        }).encode("utf-8"))
+        self.write_host(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32000, "message": message},
+                }
+            ).encode("utf-8")
+        )
 
     # ── worker side ──
 
@@ -188,13 +188,18 @@ class Supervisor:
         self.generation += 1
         gen = self.generation
         self.log.info("worker started pid=%s gen=%s cmd=%s", proc.pid, gen, " ".join(self.cmd))
-        threading.Thread(target=self.pump_worker_stdout, args=(proc, gen),
-                         name=f"worker-stdout-{gen}", daemon=True).start()
-        threading.Thread(target=self.watch_worker, args=(proc, gen),
-                         name=f"worker-wait-{gen}", daemon=True).start()
+        threading.Thread(
+            target=self.pump_worker_stdout,
+            args=(proc, gen),
+            name=f"worker-stdout-{gen}",
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=self.watch_worker, args=(proc, gen), name=f"worker-wait-{gen}", daemon=True
+        ).start()
         return proc
 
-    def send_to_worker(self, line: bytes, msg: Optional[Dict[str, Any]]) -> None:
+    def send_to_worker(self, line: bytes, msg: dict[str, Any] | None) -> None:
         with self.state:
             while self.replaying and not self.stopping:
                 self.state.wait(timeout=1.0)
@@ -246,18 +251,23 @@ class Supervisor:
             self.log.error("worker pid=%s gen=%s died unexpectedly (%s)", proc.pid, gen, why)
 
             now = time.monotonic()
-            self.exit_times = [t for t in self.exit_times if now - t < RAPID_EXIT_WINDOW_SECONDS] + [now]
+            self.exit_times = [
+                t for t in self.exit_times if now - t < RAPID_EXIT_WINDOW_SECONDS
+            ] + [now]
             if len(self.exit_times) >= RAPID_EXIT_LIMIT:
-                self.log.error("worker died %d times in %.0fs -- giving up so the host sees the failure",
-                               len(self.exit_times), RAPID_EXIT_WINDOW_SECONDS)
+                self.log.error(
+                    "worker died %d times in %.0fs -- giving up so the host sees the failure",
+                    len(self.exit_times),
+                    RAPID_EXIT_WINDOW_SECONDS,
+                )
                 self.stopping = True
                 self.state.notify_all()
-                self._fail_all_pending("ableton-mcp worker keeps crashing; see logs/ableton-mcp.log")
+                self._fail_all_pending(
+                    "ableton-mcp worker keeps crashing; see logs/ableton-mcp.log"
+                )
                 for h in self.log.handlers:
-                    try:
+                    with contextlib.suppress(Exception):
                         h.flush()
-                    except Exception:
-                        pass
                 os._exit(1)
 
             self._fail_all_pending(f"ableton-mcp worker restarted ({why}); please retry")
@@ -311,8 +321,11 @@ class Supervisor:
         if ok:
             self.log.info("worker pid=%s re-initialised; resuming", proc.pid)
         else:
-            self.log.error("worker pid=%s did not answer the replayed initialize within %.0fs",
-                           proc.pid, HANDSHAKE_TIMEOUT_SECONDS)
+            self.log.error(
+                "worker pid=%s did not answer the replayed initialize within %.0fs",
+                proc.pid,
+                HANDSHAKE_TIMEOUT_SECONDS,
+            )
         with self.state:
             self.replaying = False
             self.state.notify_all()
@@ -327,10 +340,8 @@ class Supervisor:
         if proc is None or proc.poll() is not None:
             return
         self.log.info("shutting down worker pid=%s (%s)", proc.pid, reason)
-        try:
+        with contextlib.suppress(Exception):
             proc.stdin.close()  # EOF: the MCP stdio server exits cleanly on this
-        except Exception:
-            pass
         try:
             proc.wait(timeout=SHUTDOWN_GRACE_SECONDS)
             return
@@ -340,14 +351,15 @@ class Supervisor:
             proc.terminate()
             proc.wait(timeout=2.0)
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 proc.kill()
-            except Exception:
-                pass
 
     def run(self) -> int:
-        install_signal_logging(self.log, signals=(signal.SIGTERM, signal.SIGHUP, signal.SIGINT),
-                               before_exit=lambda s: self.shutdown_worker(f"signal {s}"))
+        install_signal_logging(
+            self.log,
+            signals=(signal.SIGTERM, signal.SIGHUP, signal.SIGINT),
+            before_exit=lambda s: self.shutdown_worker(f"signal {s}"),
+        )
         self.log.info("supervisor started (ppid=%s)", os.getppid())
         with self.state:
             self.proc = self.spawn()
@@ -372,6 +384,6 @@ class Supervisor:
         return 0
 
 
-def run_supervisor(worker_cmd: List[str], cwd: Optional[str] = None) -> int:
+def run_supervisor(worker_cmd: list[str], cwd: str | None = None) -> int:
     logger = setup_file_logging("AbletonMCPSupervisor")
     return Supervisor(worker_cmd, logger, cwd=cwd).run()

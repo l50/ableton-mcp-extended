@@ -39,7 +39,7 @@ sys.modules.setdefault("_Framework.ControlSurface", _cs_module)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from AbletonMCP_Remote_Script import AbletonMCP  # noqa: E402
-from MCP_Server import server  # noqa: E402
+from MCP_Server import conversions, tools  # noqa: E402
 
 
 # ── MCP layer ──────────────────────────────────────────────────────
@@ -55,24 +55,24 @@ class TestArrangementClipTarget:
     def test_name_wins_and_index_is_poisoned(self):
         # -1 makes an outdated Remote Script (which ignores clip_name) fail
         # instead of defaulting to the first clip.
-        assert server._arrangement_clip_target(3, "Verse Gtr") == {
+        assert conversions.arrangement_clip_target(3, "Verse Gtr") == {
             "clip_name": "Verse Gtr", "clip_index": -1}
 
     def test_index_converted_to_zero_based(self):
-        assert server._arrangement_clip_target(3, "") == {"clip_index": 2}
+        assert conversions.arrangement_clip_target(3, "") == {"clip_index": 2}
 
     def test_index_below_one_without_name_is_rejected(self):
         with pytest.raises(ValueError, match="clip_index must be >= 1"):
-            server._arrangement_clip_target(0, "")
+            conversions.arrangement_clip_target(0, "")
 
 
 class TestSetArrangementClipPropertyClipName:
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_forwards_clip_name_not_index(self, mock_conn):
         conn = _connection({"clip_name": "Verse Gtr", "property": "muted", "value": True})
         mock_conn.return_value = conn
 
-        server.set_arrangement_clip_property(
+        tools.arrangement.set_arrangement_clip_property(
             MagicMock(), track_index=2, clip_name="Verse Gtr", muted=True)
 
         conn.send_command.assert_called_once_with(
@@ -80,23 +80,23 @@ class TestSetArrangementClipPropertyClipName:
             {"track_index": 1, "clip_name": "Verse Gtr", "clip_index": -1,
              "property": "muted", "value": True})
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_message_names_the_clip_actually_changed(self, mock_conn):
         # The Remote Script reports which clip it changed; trust that over the request.
         mock_conn.return_value = _connection(
             {"clip_name": "Chorus", "property": "muted", "value": True})
 
-        result = server.set_arrangement_clip_property(
+        result = tools.arrangement.set_arrangement_clip_property(
             MagicMock(), track_index=2, clip_index=1, muted=True)
 
         assert result == "Updated 'Chorus' on track 2: muted=True"
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_rename_is_sent_last_so_name_lookup_still_works(self, mock_conn):
         conn = _connection({"clip_name": "Verse Gtr", "property": "x", "value": 1})
         mock_conn.return_value = conn
 
-        result = server.set_arrangement_clip_property(
+        result = tools.arrangement.set_arrangement_clip_property(
             MagicMock(), track_index=1, clip_name="Verse Gtr",
             name="Verse Gtr 2", muted=True, color=5)
 
@@ -106,54 +106,54 @@ class TestSetArrangementClipPropertyClipName:
         assert all(p["clip_index"] == -1 for p in sent)
         assert result.startswith("Updated 'Verse Gtr' on track 1:")
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_falls_back_to_requested_name_when_result_has_no_clip_name(self, mock_conn):
         # An older Remote Script returns no clip_name.
         mock_conn.return_value = _connection({"property": "muted", "value": True})
 
-        result = server.set_arrangement_clip_property(
+        result = tools.arrangement.set_arrangement_clip_property(
             MagicMock(), track_index=1, clip_name="Verse Gtr", muted=True)
 
         assert result == "Updated 'Verse Gtr' on track 1: muted=True"
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_falls_back_to_index_when_result_is_not_a_dict(self, mock_conn):
         mock_conn.return_value = _connection(None)
 
-        result = server.set_arrangement_clip_property(
+        result = tools.arrangement.set_arrangement_clip_property(
             MagicMock(), track_index=1, clip_index=4, muted=False)
 
         assert result == "Updated clip 4 on track 1: muted=False"
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_unnamed_clip_is_labelled_by_index(self, mock_conn):
         # Live gives new clips an empty name; that must not print as ''.
         mock_conn.return_value = _connection(
             {"clip_name": "", "property": "x", "value": 1})
 
-        result = server.set_arrangement_clip_property(
+        result = tools.arrangement.set_arrangement_clip_property(
             MagicMock(), track_index=1, clip_index=1, muted=True, name="Verse")
 
         assert result == "Updated clip 1 on track 1: muted=True, name=Verse"
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_clip_index_zero_without_name_errors_instead_of_hitting_first_clip(self, mock_conn):
         conn = _connection({})
         mock_conn.return_value = conn
 
-        result = server.set_arrangement_clip_property(
+        result = tools.arrangement.set_arrangement_clip_property(
             MagicMock(), track_index=1, clip_index=0, muted=True)
 
         conn.send_command.assert_not_called()
         assert result.startswith("Error setting arrangement clip property:")
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_remote_error_is_reported(self, mock_conn):
         conn = MagicMock()
         conn.send_command.side_effect = Exception("No arrangement clip named 'X' on track 'Gtr'")
         mock_conn.return_value = conn
 
-        result = server.set_arrangement_clip_property(
+        result = tools.arrangement.set_arrangement_clip_property(
             MagicMock(), track_index=1, clip_name="X", muted=True)
 
         assert result == ("Error setting arrangement clip property: "
@@ -161,12 +161,12 @@ class TestSetArrangementClipPropertyClipName:
 
 
 class TestManageClipAutomationClipName:
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_forwards_clip_name_not_index(self, mock_conn):
         conn = _connection({"action": "clear_all", "clip_name": "Verse Gtr", "done": True})
         mock_conn.return_value = conn
 
-        result = server.manage_clip_automation(
+        result = tools.arrangement.manage_clip_automation(
             MagicMock(), track_index=2, clip_name="Verse Gtr", action="clear_all")
 
         conn.send_command.assert_called_once_with(
@@ -175,51 +175,51 @@ class TestManageClipAutomationClipName:
              "action": "clear_all", "parameter_name": "volume"})
         assert result == "Cleared all automation on clip 'Verse Gtr', track 2"
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_create_message_names_resolved_clip(self, mock_conn):
         mock_conn.return_value = _connection(
             {"action": "create", "parameter": "Volume", "clip_name": "Bridge", "done": True})
 
-        result = server.manage_clip_automation(
+        result = tools.arrangement.manage_clip_automation(
             MagicMock(), track_index=3, clip_index=2, action="create",
             parameter_name="volume")
 
         assert result == "Automation create: volume on clip 'Bridge', track 3"
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_falls_back_to_requested_name(self, mock_conn):
         mock_conn.return_value = _connection({"action": "clear", "done": True})
 
-        result = server.manage_clip_automation(
+        result = tools.arrangement.manage_clip_automation(
             MagicMock(), track_index=1, clip_name="Verse Gtr", action="clear")
 
         assert result == "Automation clear: volume on clip 'Verse Gtr', track 1"
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_falls_back_to_index(self, mock_conn):
         mock_conn.return_value = _connection(None)
 
-        result = server.manage_clip_automation(
+        result = tools.arrangement.manage_clip_automation(
             MagicMock(), track_index=1, clip_index=5, action="clear_all")
 
         assert result == "Cleared all automation on clip 5, track 1"
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_unnamed_clip_is_labelled_by_index(self, mock_conn):
         mock_conn.return_value = _connection(
             {"action": "clear_all", "clip_name": "", "done": True})
 
-        result = server.manage_clip_automation(
+        result = tools.arrangement.manage_clip_automation(
             MagicMock(), track_index=1, clip_index=1, action="clear_all")
 
         assert result == "Cleared all automation on clip 1, track 1"
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_clip_index_zero_without_name_errors(self, mock_conn):
         conn = _connection({})
         mock_conn.return_value = conn
 
-        result = server.manage_clip_automation(
+        result = tools.arrangement.manage_clip_automation(
             MagicMock(), track_index=1, clip_index=0, action="clear_all")
 
         conn.send_command.assert_not_called()

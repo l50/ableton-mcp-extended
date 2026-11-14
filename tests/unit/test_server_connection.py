@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import socket
+import subprocess
 import sys
 from unittest.mock import MagicMock, call, patch
 
@@ -21,8 +22,8 @@ if "MCP_Server.server" not in sys.modules:
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-import MCP_Server  # noqa: E402
 from MCP_Server import server  # noqa: E402
+from MCP_Server import app, connection, plugin_discovery, supervisor  # noqa: E402
 
 
 class _FakeSocket:
@@ -58,15 +59,15 @@ class _FakeSocket:
 
 @pytest.fixture(autouse=True)
 def _reset_global_connection():
-    server._ableton_connection = None
-    server._invalidate_external_plugin_cache()
+    connection._ableton_connection = None
+    plugin_discovery.invalidate_external_plugin_cache()
     yield
-    server._ableton_connection = None
-    server._invalidate_external_plugin_cache()
+    connection._ableton_connection = None
+    plugin_discovery.invalidate_external_plugin_cache()
 
 
 def _conn(sock=None):
-    return server.AbletonConnection(host="localhost", port=9877, sock=sock)
+    return connection.AbletonConnection(host="localhost", port=9877, sock=sock)
 
 
 # ── AbletonConnection.connect / disconnect ───────────────────────────
@@ -75,22 +76,22 @@ def _conn(sock=None):
 class TestConnect:
     def test_already_connected_short_circuits(self):
         conn = _conn(sock=_FakeSocket())
-        with patch.object(server.socket, "create_connection") as create:
+        with patch.object(connection.socket, "create_connection") as create:
             assert conn.connect() is True
         create.assert_not_called()
 
     def test_successful_connect_uses_bounded_timeout(self):
         sock = _FakeSocket()
         conn = _conn()
-        with patch.object(server.socket, "create_connection", return_value=sock) as create:
+        with patch.object(connection.socket, "create_connection", return_value=sock) as create:
             assert conn.connect() is True
-        create.assert_called_once_with(("localhost", 9877), timeout=server.CONNECT_TIMEOUT_SECONDS)
+        create.assert_called_once_with(("localhost", 9877), timeout=connection.CONNECT_TIMEOUT_SECONDS)
         assert conn.sock is sock
         assert sock.timeouts == [None]
 
     def test_failed_connect_returns_false(self):
         conn = _conn()
-        with patch.object(server.socket, "create_connection", side_effect=ConnectionRefusedError("no")):
+        with patch.object(connection.socket, "create_connection", side_effect=ConnectionRefusedError("no")):
             assert conn.connect() is False
         assert conn.sock is None
 
@@ -234,8 +235,8 @@ def fake_connection_cls():
     _FakeConnection.connect_results = []
     _FakeConnection.validate_errors = []
     _FakeConnection.connect_raises = None
-    with patch.object(server, "AbletonConnection", _FakeConnection), \
-            patch.object(server.time, "sleep") as sleep:
+    with patch.object(connection, "AbletonConnection", _FakeConnection), \
+            patch.object(connection.time, "sleep") as sleep:
         _FakeConnection.sleep = sleep
         yield _FakeConnection
 
@@ -243,8 +244,8 @@ def fake_connection_cls():
 class TestGetAbletonConnection:
     def test_reuses_live_connection(self, fake_connection_cls):
         existing = MagicMock()
-        server._ableton_connection = existing
-        assert server.get_ableton_connection() is existing
+        connection._ableton_connection = existing
+        assert connection.get_ableton_connection() is existing
         existing.sock.settimeout.assert_called_once_with(1.0)
         existing.sock.sendall.assert_called_once_with(b"")
         assert fake_connection_cls.instances == []
@@ -253,40 +254,40 @@ class TestGetAbletonConnection:
         dead = MagicMock()
         dead.sock.sendall.side_effect = BrokenPipeError("dead")
         dead.disconnect.side_effect = OSError("also dead")
-        server._ableton_connection = dead
-        server._external_plugin_cache["plugins"] = [{"name": "stale"}]
+        connection._ableton_connection = dead
+        plugin_discovery._external_plugin_cache["plugins"] = [{"name": "stale"}]
 
-        conn = server.get_ableton_connection()
+        conn = connection.get_ableton_connection()
 
         assert conn is fake_connection_cls.instances[0]
-        assert (conn.host, conn.port) == (server.ABLETON_HOST, server.ABLETON_PORT)
+        assert (conn.host, conn.port) == (connection.ABLETON_HOST, connection.ABLETON_PORT)
         dead.disconnect.assert_called_once()
-        assert server._external_plugin_cache["plugins"] is None
+        assert plugin_discovery._external_plugin_cache["plugins"] is None
 
     def test_retries_until_connect_succeeds(self, fake_connection_cls):
         fake_connection_cls.connect_results = [False, True]
-        conn = server.get_ableton_connection()
+        conn = connection.get_ableton_connection()
         assert conn is fake_connection_cls.instances[1]
-        fake_connection_cls.sleep.assert_called_once_with(server.CONNECT_RETRY_DELAY_SECONDS)
+        fake_connection_cls.sleep.assert_called_once_with(connection.CONNECT_RETRY_DELAY_SECONDS)
 
     def test_retries_after_failed_validation(self, fake_connection_cls):
         fake_connection_cls.validate_errors = [RuntimeError("bad handshake"), None]
-        conn = server.get_ableton_connection()
+        conn = connection.get_ableton_connection()
         assert fake_connection_cls.instances[0].disconnected is True
         assert conn is fake_connection_cls.instances[1]
 
     def test_gives_up_after_all_attempts(self, fake_connection_cls):
-        fake_connection_cls.connect_results = [False] * server.CONNECT_ATTEMPTS
+        fake_connection_cls.connect_results = [False] * connection.CONNECT_ATTEMPTS
         with pytest.raises(Exception, match="Could not connect to Ableton at localhost:9877"):
-            server.get_ableton_connection()
-        assert len(fake_connection_cls.instances) == server.CONNECT_ATTEMPTS
-        assert fake_connection_cls.sleep.call_count == server.CONNECT_ATTEMPTS - 1
-        assert server._ableton_connection is None
+            connection.get_ableton_connection()
+        assert len(fake_connection_cls.instances) == connection.CONNECT_ATTEMPTS
+        assert fake_connection_cls.sleep.call_count == connection.CONNECT_ATTEMPTS - 1
+        assert connection._ableton_connection is None
 
     def test_unexpected_connect_error_is_cleaned_up(self, fake_connection_cls):
         fake_connection_cls.connect_raises = RuntimeError("kaboom")
         with pytest.raises(Exception, match="Could not connect"):
-            server.get_ableton_connection()
+            connection.get_ableton_connection()
         assert all(c.disconnected for c in fake_connection_cls.instances)
 
 
@@ -296,43 +297,45 @@ class TestGetAbletonConnection:
 class TestServerLifespan:
     def _run(self):
         async def body():
-            async with server.server_lifespan(None) as ctx:
+            async with app.server_lifespan(None) as ctx:
                 return ctx
         return asyncio.run(body())
 
     def test_yields_empty_context_and_disconnects(self):
         conn = MagicMock()
-        server._ableton_connection = conn
-        server._external_plugin_cache["plugins"] = [{"name": "x"}]
+        connection._ableton_connection = conn
+        plugin_discovery._external_plugin_cache["plugins"] = [{"name": "x"}]
 
         assert self._run() == {}
 
         conn.disconnect.assert_called_once()
-        assert server._ableton_connection is None
-        assert server._external_plugin_cache["plugins"] is None
+        assert connection._ableton_connection is None
+        assert plugin_discovery._external_plugin_cache["plugins"] is None
 
     def test_no_connection_to_close(self):
         assert self._run() == {}
 
 
 class TestEntryPoint:
-    def test_load_supervisor_module_as_package(self):
-        assert server._load_supervisor_module() is sys.modules["MCP_Server.supervisor"]
+    def test_uses_the_package_supervisor(self):
+        assert server.supervisor is sys.modules["MCP_Server.supervisor"]
 
-    def test_load_supervisor_module_as_script(self, monkeypatch):
-        monkeypatch.delattr(MCP_Server, "supervisor", raising=False)
-        monkeypatch.setitem(sys.modules, "MCP_Server.supervisor", None)
-        monkeypatch.setattr(sys, "path", list(sys.path))
-        with patch.dict(sys.modules):
-            sys.modules.pop("supervisor", None)
-            mod = server._load_supervisor_module()
-            assert mod.__name__ == "supervisor"
-            assert hasattr(mod, "Supervisor")
-        assert sys.path[0] == os.path.dirname(os.path.abspath(server.__file__))
+    def test_runs_by_path_as_the_mcp_config_does(self, tmp_path):
+        # Claude's MCP config runs `python <checkout>/MCP_Server/server.py`.
+        # As a worker on a closed stdin it imports everything and exits cleanly.
+        log_file = tmp_path / "worker.log"
+        proc = subprocess.run(
+            [sys.executable, os.path.abspath(server.__file__), "--worker"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(server.__file__))),
+            env={**os.environ, supervisor.LOG_ENV: str(log_file)},
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert log_file.exists()
 
     def test_run_worker_sets_up_logging_and_runs_mcp(self):
         fake_sup = MagicMock()
-        with patch.object(server, "_load_supervisor_module", return_value=fake_sup), \
+        with patch.object(server, "supervisor", fake_sup), \
                 patch.object(server.mcp, "run") as run:
             server._run_worker()
         fake_sup.setup_file_logging.assert_called_once_with("AbletonMCPWorker")
@@ -351,22 +354,20 @@ class TestEntryPoint:
         else:
             monkeypatch.setenv("ABLETON_MCP_NO_SUPERVISOR", env)
         with patch.object(server, "_run_worker") as run_worker, \
-                patch.object(server, "_load_supervisor_module") as load:
+                patch.object(supervisor, "run_supervisor") as run_supervisor:
             server.main()
         run_worker.assert_called_once()
-        load.assert_not_called()
+        run_supervisor.assert_not_called()
 
     def test_main_launches_supervisor_with_worker_command(self, monkeypatch):
         monkeypatch.setattr(sys, "argv", ["server.py"])
         monkeypatch.delenv("ABLETON_MCP_NO_SUPERVISOR", raising=False)
-        fake_sup = MagicMock()
-        fake_sup.run_supervisor.return_value = 3
-        with patch.object(server, "_load_supervisor_module", return_value=fake_sup):
+        with patch.object(supervisor, "run_supervisor", return_value=3) as run_supervisor:
             with pytest.raises(SystemExit) as exc:
                 server.main()
         assert exc.value.code == 3
         server_file = os.path.abspath(server.__file__)
-        fake_sup.run_supervisor.assert_called_once_with(
+        run_supervisor.assert_called_once_with(
             [sys.executable, server_file, "--worker"],
             cwd=os.path.dirname(os.path.dirname(server_file)),
         )

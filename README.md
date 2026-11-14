@@ -149,7 +149,7 @@ graph TB
 
 1. You issue a command in plain English to your AI assistant (e.g., "Create a new MIDI track and name it 'Bass'").
 2. The AI Assistant understands the intent and calls the appropriate tool from the MCP server.
-3. The MCP Server (server.py) receives the tool call and constructs a specific JSON command.
+3. The MCP Server (started by `MCP_Server/server.py`; the tools live in `MCP_Server/tools/`) receives the tool call and constructs a specific JSON command.
 4. The Ableton Remote Script (__init__.py), running inside Live, receives the JSON command via a socket connection.
 5. The Remote Script executes the command using the official Ableton Live API, making the change in your session instantly.
 
@@ -195,7 +195,7 @@ Example mcp-config.json:
   "mcpServers": {
     "AbletonMCP": {
       "command": "python",
-      "args": ["/path/to/ableton-mcp-extended/server.py"]
+      "args": ["/path/to/ableton-mcp-extended/MCP_Server/server.py"]
     },
     "ElevenLabs": {
       "command": "python",
@@ -295,6 +295,15 @@ uv run --extra test python -m pytest --cov
 ```
 
 `--cov` measures `MCP_Server` and `AbletonMCP_Remote_Script` and fails the run if total coverage drops below the `fail_under` value in `pyproject.toml`. Tests marked `integration` need a running Live instance and are skipped by default.
+
+### Linting
+
+`ruff` lints and formats the MCP server package. The rules, and the files they cover, are set under `[tool.ruff]` in `pyproject.toml`:
+
+```bash
+uv run --extra dev ruff check
+uv run --extra dev ruff format --check
+```
 
 ---
 

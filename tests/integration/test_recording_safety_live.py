@@ -19,7 +19,7 @@ if os.environ.get("ABLETON_MCP_LIVE_TESTS") != "1":
     pytest.skip("set ABLETON_MCP_LIVE_TESTS=1 to run Live checks",
                 allow_module_level=True)
 
-from MCP_Server.server import AbletonConnection  # noqa: E402
+from MCP_Server.connection import AbletonConnection  # noqa: E402
 
 
 @pytest.fixture

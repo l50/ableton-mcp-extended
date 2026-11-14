@@ -15,26 +15,27 @@ sys.modules['mcp.server.fastmcp'] = _mock_fastmcp
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from MCP_Server.server import (
-    bar_to_beat, beat_to_bar,
-    _convert_bar_to_beat,
+from MCP_Server.conversions import (  # noqa: E402
+    bar_to_beat,
+    beat_to_bar,
 )
+from MCP_Server.tools.arrangement import _convert_bar_to_beat  # noqa: E402
 
 
 class TestConvertBarToBeat:
     """Test the _convert_bar_to_beat helper that dispatches bar vs beat."""
 
-    @patch('MCP_Server.server._get_time_signature', return_value=(4, 4))
+    @patch('MCP_Server.tools.arrangement._get_time_signature', return_value=(4, 4))
     def test_bar_takes_precedence(self, mock_ts):
         # When both bar and beat are provided, bar should take precedence
         assert _convert_bar_to_beat(5, 99.0) == 16.0
 
-    @patch('MCP_Server.server._get_time_signature', return_value=(4, 4))
+    @patch('MCP_Server.tools.arrangement._get_time_signature', return_value=(4, 4))
     def test_bar_zero_uses_beat(self, mock_ts):
         # When bar is 0 (unset), the raw beat value should be used instead
         assert _convert_bar_to_beat(0, 12.0) == 12.0
 
-    @patch('MCP_Server.server._get_time_signature', return_value=(3, 4))
+    @patch('MCP_Server.tools.arrangement._get_time_signature', return_value=(3, 4))
     def test_bar_with_3_4(self, mock_ts):
         # Bar conversion should respect a 3/4 time signature
         assert _convert_bar_to_beat(5, 0.0) == 12.0
@@ -43,7 +44,7 @@ class TestConvertBarToBeat:
 class TestGetArrangementInfoCommand:
     """Test get_arrangement_info command dict construction."""
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_track_0_sends_minus_1(self, mock_conn):
         """track_index=0 (all tracks) should send -1 to the Remote Script."""
         mock_ableton = MagicMock()
@@ -55,13 +56,13 @@ class TestGetArrangementInfoCommand:
         }
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import get_arrangement_info
+        from MCP_Server.tools.arrangement import get_arrangement_info  # noqa: E402
         get_arrangement_info(MagicMock(), track_index=0)
 
         mock_ableton.send_command.assert_called_with(
             "get_arrangement_info", {"track_index": -1})
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_track_3_sends_2(self, mock_conn):
         """track_index=3 (1-based) should convert to 2 (0-based) for the Remote Script."""
         mock_ableton = MagicMock()
@@ -73,20 +74,20 @@ class TestGetArrangementInfoCommand:
         }
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import get_arrangement_info
+        from MCP_Server.tools.arrangement import get_arrangement_info  # noqa: E402
         get_arrangement_info(MagicMock(), track_index=3)
 
         mock_ableton.send_command.assert_called_with(
             "get_arrangement_info", {"track_index": 2})
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_get_cue_points_command(self, mock_conn):
         """get_cue_points should send the correct command with no index params."""
         mock_ableton = MagicMock()
         mock_ableton.send_command.return_value = {"cue_points": []}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import get_cue_points
+        from MCP_Server.tools.arrangement import get_cue_points  # noqa: E402
         get_cue_points(MagicMock())
 
         mock_ableton.send_command.assert_any_call("get_cue_points")
@@ -95,29 +96,29 @@ class TestGetArrangementInfoCommand:
 class TestSetSongTimeCommand:
     """Test set_song_time command construction."""
 
-    @patch('MCP_Server.server._get_time_signature', return_value=(4, 4))
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.tools.arrangement._get_time_signature', return_value=(4, 4))
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_bar_8_sends_beat_28(self, mock_conn, mock_ts):
         # Bar 8 in 4/4 = (8-1)*4 = beat 28.0; verify the RS receives this value
         mock_ableton = MagicMock()
         mock_ableton.send_command.return_value = {"time": 28.0}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import set_song_time
+        from MCP_Server.tools.arrangement import set_song_time  # noqa: E402
         set_song_time(MagicMock(), bar=8)
 
         mock_ableton.send_command.assert_called_with(
             "set_song_time", {"time": 28.0})
 
-    @patch('MCP_Server.server._get_time_signature', return_value=(4, 4))
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.tools.arrangement._get_time_signature', return_value=(4, 4))
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_beat_direct(self, mock_conn, mock_ts):
         # When bar=0, the raw beat value should be sent directly to the RS
         mock_ableton = MagicMock()
         mock_ableton.send_command.return_value = {"time": 12.0}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import set_song_time
+        from MCP_Server.tools.arrangement import set_song_time  # noqa: E402
         set_song_time(MagicMock(), beat=12.0)
 
         mock_ableton.send_command.assert_any_call(
@@ -127,8 +128,8 @@ class TestSetSongTimeCommand:
 class TestSetArrangementLoopCommand:
     """Test set_arrangement_loop command construction."""
 
-    @patch('MCP_Server.server._get_time_signature', return_value=(4, 4))
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.tools.arrangement._get_time_signature', return_value=(4, 4))
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_bar_range(self, mock_conn, mock_ts):
         # Bars 4–8 in 4/4: start=12.0, length=16.0; verify correct loop region
         mock_ableton = MagicMock()
@@ -136,7 +137,7 @@ class TestSetArrangementLoopCommand:
             "enabled": True, "start": 12.0, "length": 16.0}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import set_arrangement_loop
+        from MCP_Server.tools.arrangement import set_arrangement_loop  # noqa: E402
         set_arrangement_loop(MagicMock(), enabled=True, start_bar=4, end_bar=8)
 
         args = mock_ableton.send_command.call_args
@@ -149,27 +150,27 @@ class TestSetArrangementLoopCommand:
 class TestJumpToCuePointCommand:
     """Test jump_to_cue_point command construction."""
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_direction_next(self, mock_conn):
         # Jumping by direction should send the direction string to the RS
         mock_ableton = MagicMock()
         mock_ableton.send_command.return_value = {"direction": "next"}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import jump_to_cue_point
+        from MCP_Server.tools.arrangement import jump_to_cue_point  # noqa: E402
         jump_to_cue_point(MagicMock(), direction="next")
 
         mock_ableton.send_command.assert_called_with(
             "jump_to_cue", {"direction": "next"})
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_name(self, mock_conn):
         # Jumping by name should send the cue point name to the RS
         mock_ableton = MagicMock()
         mock_ableton.send_command.return_value = {"name": "Verse"}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import jump_to_cue_point
+        from MCP_Server.tools.arrangement import jump_to_cue_point  # noqa: E402
         jump_to_cue_point(MagicMock(), name="Verse")
 
         mock_ableton.send_command.assert_called_with(
@@ -179,29 +180,29 @@ class TestJumpToCuePointCommand:
 class TestCreateCuePointCommand:
     """Test create/delete cue point commands."""
 
-    @patch('MCP_Server.server._get_time_signature', return_value=(4, 4))
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.tools.arrangement._get_time_signature', return_value=(4, 4))
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_create_at_bar(self, mock_conn, mock_ts):
         # Creating a cue point at bar 5 should convert to beat 16.0 and include the name
         mock_ableton = MagicMock()
         mock_ableton.send_command.return_value = {}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import create_cue_point
+        from MCP_Server.tools.arrangement import create_cue_point  # noqa: E402
         create_cue_point(MagicMock(), bar=5, name="Bridge")
 
         mock_ableton.send_command.assert_called_with(
             "create_cue_point", {"time": 16.0, "name": "Bridge"})
 
-    @patch('MCP_Server.server._get_time_signature', return_value=(4, 4))
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.tools.arrangement._get_time_signature', return_value=(4, 4))
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_delete_at_bar(self, mock_conn, mock_ts):
         # Deleting a cue point at bar 5 should convert to beat 16.0
         mock_ableton = MagicMock()
         mock_ableton.send_command.return_value = {}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import delete_cue_point
+        from MCP_Server.tools.arrangement import delete_cue_point  # noqa: E402
         delete_cue_point(MagicMock(), bar=5)
 
         mock_ableton.send_command.assert_called_with(
@@ -211,8 +212,8 @@ class TestCreateCuePointCommand:
 class TestCreateArrangementMidiClipCommand:
     """Test create_arrangement_midi_clip command construction."""
 
-    @patch('MCP_Server.server._get_time_signature', return_value=(4, 4))
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.tools.arrangement._get_time_signature', return_value=(4, 4))
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_bar_range_converts(self, mock_conn, mock_ts):
         # Track 1 → 0, bars 5–9 → position 16.0, length 16.0
         mock_ableton = MagicMock()
@@ -220,7 +221,7 @@ class TestCreateArrangementMidiClipCommand:
             "start_time": 16.0, "overlapped_clips": []}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import create_arrangement_midi_clip
+        from MCP_Server.tools.arrangement import create_arrangement_midi_clip  # noqa: E402
         create_arrangement_midi_clip(
             MagicMock(), track_index=1, start_bar=5, end_bar=9)
 
@@ -230,8 +231,8 @@ class TestCreateArrangementMidiClipCommand:
         assert args[0][1]["position"] == 16.0
         assert args[0][1]["length"] == 16.0
 
-    @patch('MCP_Server.server._get_time_signature', return_value=(4, 4))
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.tools.arrangement._get_time_signature', return_value=(4, 4))
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_overlap_warning(self, mock_conn, mock_ts):
         # When the RS reports overlapped clips, the result should contain a warning
         mock_ableton = MagicMock()
@@ -239,7 +240,7 @@ class TestCreateArrangementMidiClipCommand:
             "start_time": 0.0, "overlapped_clips": ["Intro"]}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import create_arrangement_midi_clip
+        from MCP_Server.tools.arrangement import create_arrangement_midi_clip  # noqa: E402
         result = create_arrangement_midi_clip(
             MagicMock(), track_index=1, start_bar=1, end_bar=5)
 
@@ -249,15 +250,15 @@ class TestCreateArrangementMidiClipCommand:
 class TestCreateArrangementAudioClipCommand:
     """Test create_arrangement_audio_clip command construction."""
 
-    @patch('MCP_Server.server._get_time_signature', return_value=(4, 4))
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.tools.arrangement._get_time_signature', return_value=(4, 4))
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_converts_indices(self, mock_conn, mock_ts):
         # Track 2 → 1 (0-based), file path passed through unchanged
         mock_ableton = MagicMock()
         mock_ableton.send_command.return_value = {}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import create_arrangement_audio_clip
+        from MCP_Server.tools.arrangement import create_arrangement_audio_clip  # noqa: E402
         create_arrangement_audio_clip(
             MagicMock(), track_index=2, file_path="/audio.wav", start_bar=3)
 
@@ -269,15 +270,15 @@ class TestCreateArrangementAudioClipCommand:
 class TestDuplicateClipToArrangementCommand:
     """Test duplicate_clip_to_arrangement command construction."""
 
-    @patch('MCP_Server.server._get_time_signature', return_value=(4, 4))
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.tools.arrangement._get_time_signature', return_value=(4, 4))
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_converts_all_indices(self, mock_conn, mock_ts):
         # Both track and clip indices convert from 1-based to 0-based; bar converts to beat
         mock_ableton = MagicMock()
         mock_ableton.send_command.return_value = {}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import duplicate_clip_to_arrangement
+        from MCP_Server.tools.arrangement import duplicate_clip_to_arrangement  # noqa: E402
         duplicate_clip_to_arrangement(
             MagicMock(), track_index=2, clip_index=3, destination_bar=5)
 
@@ -290,28 +291,28 @@ class TestDuplicateClipToArrangementCommand:
 class TestDeleteArrangementClipCommand:
     """Test delete_arrangement_clip command construction."""
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_by_index(self, mock_conn):
         # Deleting by index: track 1 → 0, clip 2 → 1 (both 1-based to 0-based)
         mock_ableton = MagicMock()
         mock_ableton.send_command.return_value = {"deleted": True}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import delete_arrangement_clip
+        from MCP_Server.tools.arrangement import delete_arrangement_clip  # noqa: E402
         delete_arrangement_clip(MagicMock(), track_index=1, clip_index=2)
 
         args = mock_ableton.send_command.call_args
         assert args[0][1]["track_index"] == 0
         assert args[0][1]["clip_index"] == 1
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_by_name(self, mock_conn):
         # Deleting by name should pass clip_name and omit clip_index from the command
         mock_ableton = MagicMock()
         mock_ableton.send_command.return_value = {"deleted": True}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import delete_arrangement_clip
+        from MCP_Server.tools.arrangement import delete_arrangement_clip  # noqa: E402
         delete_arrangement_clip(
             MagicMock(), track_index=1, clip_name="Intro")
 
@@ -323,14 +324,14 @@ class TestDeleteArrangementClipCommand:
 class TestSetArrangementClipPropertyCommand:
     """Test set_arrangement_clip_property command construction."""
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_index_conversion(self, mock_conn):
         # Track 2 → 1, clip 3 → 2 when sending to the RS
         mock_ableton = MagicMock()
         mock_ableton.send_command.return_value = {"property": "muted", "value": True}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import set_arrangement_clip_property
+        from MCP_Server.tools.arrangement import set_arrangement_clip_property  # noqa: E402
         set_arrangement_clip_property(
             MagicMock(), track_index=2, clip_index=3, muted=True)
 
@@ -338,41 +339,41 @@ class TestSetArrangementClipPropertyCommand:
         assert args[0][1]["track_index"] == 1  # 2 → 1
         assert args[0][1]["clip_index"] == 2  # 3 → 2
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_only_non_none_sent(self, mock_conn):
         # Only properties with non-None values should generate RS commands
         mock_ableton = MagicMock()
         mock_ableton.send_command.return_value = {"property": "muted", "value": True}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import set_arrangement_clip_property
+        from MCP_Server.tools.arrangement import set_arrangement_clip_property  # noqa: E402
         set_arrangement_clip_property(
             MagicMock(), track_index=1, clip_index=1, muted=True)
 
         # Should only send one command (for muted)
         assert mock_ableton.send_command.call_count == 1
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_multiple_props_sends_multiple(self, mock_conn):
         # Setting two properties should result in two separate RS commands
         mock_ableton = MagicMock()
         mock_ableton.send_command.return_value = {"property": "x", "value": True}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import set_arrangement_clip_property
+        from MCP_Server.tools.arrangement import set_arrangement_clip_property  # noqa: E402
         set_arrangement_clip_property(
             MagicMock(), track_index=1, clip_index=1,
             muted=True, looping=False)
 
         assert mock_ableton.send_command.call_count == 2
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_no_props_no_command(self, mock_conn):
         # When no properties are specified, no RS commands should be sent
         mock_ableton = MagicMock()
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import set_arrangement_clip_property
+        from MCP_Server.tools.arrangement import set_arrangement_clip_property  # noqa: E402
         result = set_arrangement_clip_property(
             MagicMock(), track_index=1, clip_index=1)
 
@@ -383,14 +384,14 @@ class TestSetArrangementClipPropertyCommand:
 class TestSetAbletonViewCommand:
     """Test set_ableton_view command construction."""
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_sends_view_name(self, mock_conn):
         # The view name string should be passed through to the RS as view_name
         mock_ableton = MagicMock()
         mock_ableton.send_command.return_value = {"visible": True}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import set_ableton_view
+        from MCP_Server.tools.session import set_ableton_view  # noqa: E402
         set_ableton_view(MagicMock(), view="Session")
 
         mock_ableton.send_command.assert_called_with(
@@ -400,28 +401,28 @@ class TestSetAbletonViewCommand:
 class TestControlArrangementViewCommand:
     """Test control_arrangement_view command construction."""
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_collapse_converts_index(self, mock_conn):
         # Track index 3 (1-based) should convert to 2 (0-based) for collapse action
         mock_ableton = MagicMock()
         mock_ableton.send_command.return_value = {"action": "collapse_track", "done": True}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import control_arrangement_view
+        from MCP_Server.tools.arrangement import control_arrangement_view  # noqa: E402
         control_arrangement_view(
             MagicMock(), action="collapse_track", track_index=3)
 
         args = mock_ableton.send_command.call_args
         assert args[0][1]["track_index"] == 2  # 3 → 2
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_zoom_in(self, mock_conn):
         # Zoom actions that don't need a track index should default track_index to 0
         mock_ableton = MagicMock()
         mock_ableton.send_command.return_value = {"action": "zoom_in", "done": True}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import control_arrangement_view
+        from MCP_Server.tools.arrangement import control_arrangement_view  # noqa: E402
         control_arrangement_view(MagicMock(), action="zoom_in")
 
         mock_ableton.send_command.assert_called_with(
@@ -431,14 +432,14 @@ class TestControlArrangementViewCommand:
 class TestManageClipAutomationCommand:
     """Test manage_clip_automation command construction."""
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_create_converts_indices(self, mock_conn):
         # Track 2 → 1, clip 3 → 2; action and parameter_name pass through
         mock_ableton = MagicMock()
         mock_ableton.send_command.return_value = {"action": "create", "done": True}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import manage_clip_automation
+        from MCP_Server.tools.arrangement import manage_clip_automation  # noqa: E402
         manage_clip_automation(
             MagicMock(), track_index=2, clip_index=3,
             action="create", parameter_name="volume")
@@ -449,14 +450,14 @@ class TestManageClipAutomationCommand:
         assert args[0][1]["action"] == "create"
         assert args[0][1]["parameter_name"] == "volume"
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_clear_all(self, mock_conn):
         # The clear_all action should produce a result message indicating all automation was cleared
         mock_ableton = MagicMock()
         mock_ableton.send_command.return_value = {"action": "clear_all", "done": True}
         mock_conn.return_value = mock_ableton
 
-        from MCP_Server.server import manage_clip_automation
+        from MCP_Server.tools.arrangement import manage_clip_automation  # noqa: E402
         result = manage_clip_automation(
             MagicMock(), track_index=1, clip_index=1, action="clear_all")
 

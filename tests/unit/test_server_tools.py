@@ -1,4 +1,4 @@
-"""Table-driven unit tests for the MCP tool layer in MCP_Server/server.py.
+"""Table-driven unit tests for the MCP tool layer in MCP_Server/tools/.
 
 Every tool is called with ``get_ableton_connection`` patched to a fake that
 records the command and params sent over the socket and replays scripted
@@ -23,6 +23,7 @@ if "MCP_Server.server" not in sys.modules:
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from MCP_Server import server  # noqa: E402
+from MCP_Server import connection, plugin_discovery, tools  # noqa: E402
 
 CTX = MagicMock()
 _NO_PARAMS = object()
@@ -59,14 +60,14 @@ class FakeAbleton:
 
 @pytest.fixture(autouse=True)
 def _clean_plugin_cache():
-    server._invalidate_external_plugin_cache()
+    plugin_discovery.invalidate_external_plugin_cache()
     yield
-    server._invalidate_external_plugin_cache()
+    plugin_discovery.invalidate_external_plugin_cache()
 
 
 def run_tool(fn, replies=None, **kwargs):
     fake = FakeAbleton(replies)
-    with patch.object(server, "get_ableton_connection", return_value=fake):
+    with patch.object(connection, "get_ableton_connection", return_value=fake):
         out = fn(CTX, **kwargs)
     return out, fake
 
@@ -78,24 +79,25 @@ SIG_4_4 = {"signature_numerator": 4, "signature_denominator": 4}
 
 SIMPLE_CASES = [
     # (id, tool, kwargs, replies, command, params, expected substrings)
-    ("get_session_info", server.get_session_info, {},
+    ("get_session_info", tools.session.get_session_info, {},
      {"get_session_info": {"tempo": 120.0}}, "get_session_info", _NO_PARAMS,
      ['"tempo": 120.0']),
-    ("get_track_info", server.get_track_info, {"track_index": 2},
-     {"get_track_info": {"name": "Bass"}}, "get_track_info", {"track_index": 1},
+    ("get_track_info", tools.tracks.get_track_info, {"track_index": 2},
+     {"get_track_info": {"name": "Bass"}}, "get_track_info",
+     {"track_index": 1, "include_clip_slots": True},
      ['"name": "Bass"']),
-    ("create_midi_track", server.create_midi_track, {"index": 3},
+    ("create_midi_track", tools.tracks.create_midi_track, {"index": 3},
      {"create_midi_track": {"name": "4-MIDI"}}, "create_midi_track", {"index": 3},
      ["Created new MIDI track: 4-MIDI"]),
-    ("create_midi_track_unnamed", server.create_midi_track, {},
+    ("create_midi_track_unnamed", tools.tracks.create_midi_track, {},
      {}, "create_midi_track", {"index": -1}, ["Created new MIDI track: unknown"]),
-    ("set_track_name", server.set_track_name, {"track_index": 1, "name": "Lead"},
+    ("set_track_name", tools.tracks.set_track_name, {"track_index": 1, "name": "Lead"},
      {"set_track_name": {"name": "Lead"}}, "set_track_name",
      {"track_index": 0, "name": "Lead"}, ["Renamed track to: Lead"]),
-    ("create_clip", server.create_clip, {"track_index": 1, "clip_index": 2, "length": 8.0},
+    ("create_clip", tools.clips.create_clip, {"track_index": 1, "clip_index": 2, "length": 8.0},
      {}, "create_clip", {"track_index": 0, "clip_index": 1, "length": 8.0},
      ["Created new clip at track 1, slot 2 with length 8.0 beats"]),
-    ("add_notes_to_clip", server.add_notes_to_clip,
+    ("add_notes_to_clip", tools.clips.add_notes_to_clip,
      {"track_index": 2, "clip_index": 1,
       "notes": [{"pitch": 60, "start_time": 0, "duration": 1, "velocity": 100, "mute": False},
                 {"pitch": 64, "start_time": 1, "duration": 1, "velocity": 90, "mute": False}]},
@@ -104,54 +106,54 @@ SIMPLE_CASES = [
       "notes": [{"pitch": 60, "start_time": 0, "duration": 1, "velocity": 100, "mute": False},
                 {"pitch": 64, "start_time": 1, "duration": 1, "velocity": 90, "mute": False}]},
      ["Added 2 notes to clip at track 2, slot 1"]),
-    ("set_clip_name", server.set_clip_name, {"track_index": 1, "clip_index": 3, "name": "Verse"},
+    ("set_clip_name", tools.clips.set_clip_name, {"track_index": 1, "clip_index": 3, "name": "Verse"},
      {}, "set_clip_name", {"track_index": 0, "clip_index": 2, "name": "Verse"},
      ["Renamed clip at track 1, slot 3 to 'Verse'"]),
-    ("set_tempo", server.set_tempo, {"tempo": 128.0},
+    ("set_tempo", tools.session.set_tempo, {"tempo": 128.0},
      {}, "set_tempo", {"tempo": 128.0}, ["Set tempo to 128.0 BPM"]),
-    ("fire_clip", server.fire_clip, {"track_index": 3, "clip_index": 1},
+    ("fire_clip", tools.clips.fire_clip, {"track_index": 3, "clip_index": 1},
      {}, "fire_clip", {"track_index": 2, "clip_index": 0},
      ["Started playing clip at track 3, slot 1"]),
-    ("stop_clip", server.stop_clip, {"track_index": 3, "clip_index": 2},
+    ("stop_clip", tools.clips.stop_clip, {"track_index": 3, "clip_index": 2},
      {}, "stop_clip", {"track_index": 2, "clip_index": 1},
      ["Stopped clip at track 3, slot 2"]),
-    ("start_playback", server.start_playback, {}, {}, "start_playback", _NO_PARAMS,
+    ("start_playback", tools.session.start_playback, {}, {}, "start_playback", _NO_PARAMS,
      ["Started playback"]),
-    ("stop_playback", server.stop_playback, {}, {}, "stop_playback", _NO_PARAMS,
+    ("stop_playback", tools.session.stop_playback, {}, {}, "stop_playback", _NO_PARAMS,
      ["Stopped playback"]),
-    ("jump_to_cue_next", server.jump_to_cue_point, {"direction": "next"},
+    ("jump_to_cue_next", tools.arrangement.jump_to_cue_point, {"direction": "next"},
      {"jump_to_cue": {"direction": "next", "time": 16.0}}, "jump_to_cue",
      {"direction": "next"}, ["Jumped to cue point:", "16.0"]),
-    ("jump_to_cue_name", server.jump_to_cue_point, {"name": "Drop"},
+    ("jump_to_cue_name", tools.arrangement.jump_to_cue_point, {"name": "Drop"},
      {"jump_to_cue": {"name": "Drop"}}, "jump_to_cue", {"name": "Drop"},
      ["Jumped to cue point:", "Drop"]),
-    ("set_ableton_view", server.set_ableton_view, {"view": "Session"},
+    ("set_ableton_view", tools.session.set_ableton_view, {"view": "Session"},
      {}, "set_view", {"view_name": "Session"}, ["Switched to Session view"]),
-    ("control_view_zoom", server.control_arrangement_view, {"action": "zoom_in"},
+    ("control_view_zoom", tools.arrangement.control_arrangement_view, {"action": "zoom_in"},
      {}, "control_arrangement_view", {"action": "zoom_in", "track_index": 0},
      ["Arrangement view: zoom_in done"]),
-    ("control_view_collapse", server.control_arrangement_view,
+    ("control_view_collapse", tools.arrangement.control_arrangement_view,
      {"action": "collapse_track", "track_index": 3},
      {}, "control_arrangement_view", {"action": "collapse_track", "track_index": 2},
      ["collapse_track done"]),
-    ("manage_automation_create", server.manage_clip_automation,
+    ("manage_automation_create", tools.arrangement.manage_clip_automation,
      {"track_index": 2, "clip_index": 3, "action": "create", "parameter_name": "panning"},
      {}, "manage_clip_automation",
      {"track_index": 1, "clip_index": 2, "action": "create", "parameter_name": "panning"},
      ["Automation create: panning on clip 3, track 2"]),
-    ("manage_automation_clear_all", server.manage_clip_automation,
+    ("manage_automation_clear_all", tools.arrangement.manage_clip_automation,
      {"track_index": 1, "clip_index": 1, "action": "clear_all"},
      {}, "manage_clip_automation",
      {"track_index": 0, "clip_index": 0, "action": "clear_all", "parameter_name": "volume"},
      ["Cleared all automation on clip 1, track 1"]),
-    ("navigate_preset_current", server.navigate_device_preset,
+    ("navigate_preset_current", tools.devices.navigate_device_preset,
      {"track_index": 1, "direction": "current"},
      {"navigate_preset": {"device_name": "Operator", "preset_name": "Bell",
                           "preset_index": 2, "preset_count": 10}},
      "navigate_preset",
      {"track_index": 0, "device_index": 0, "chain_index": None, "direction": "current"},
      ["Operator: current preset is 'Bell' (3/10)"]),
-    ("navigate_preset_next", server.navigate_device_preset,
+    ("navigate_preset_next", tools.devices.navigate_device_preset,
      {"track_index": 2, "device_index": 2, "chain_index": 1, "direction": "next"},
      {"navigate_preset": {"device_name": "Operator", "preset_name": "Pad",
                           "preset_index": 3, "preset_count": 10}},
@@ -174,7 +176,7 @@ def test_simple_tool(tool, kwargs, replies, command, params, expected):
 
 
 def test_manage_clip_automation_targets_named_clip():
-    out, fake = run_tool(server.manage_clip_automation, track_index=1, clip_index=0,
+    out, fake = run_tool(tools.arrangement.manage_clip_automation, track_index=1, clip_index=0,
                          clip_name="Chorus", action="clear_all")
     [params] = fake.sent("manage_clip_automation")
     assert params["clip_name"] == "Chorus"
@@ -185,79 +187,79 @@ def test_manage_clip_automation_targets_named_clip():
 # ── every tool reports connection failures as text ───────────────────
 
 ERROR_CASES = [
-    (server.get_session_info, {}, "Error getting session info: boom"),
-    (server.get_track_info, {"track_index": 1}, "Error getting track info: boom"),
-    (server.create_midi_track, {}, "Error creating MIDI track: boom"),
-    (server.set_track_name, {"track_index": 1, "name": "x"}, "Error setting track name: boom"),
-    (server.get_track_volume, {"track_index": 1}, "Error getting track volume: boom"),
-    (server.set_track_volume, {"track_index": 1, "volume": 0.5}, "Error setting track volume: boom"),
-    (server.set_track_panning, {"track_index": 1, "panning": 0.0}, "Error setting track panning: boom"),
-    (server.create_clip, {"track_index": 1, "clip_index": 1}, "Error creating clip: boom"),
-    (server.add_notes_to_clip, {"track_index": 1, "clip_index": 1, "notes": []},
+    (tools.session.get_session_info, {}, "Error getting session info: boom"),
+    (tools.tracks.get_track_info, {"track_index": 1}, "Error getting track info: boom"),
+    (tools.tracks.create_midi_track, {}, "Error creating MIDI track: boom"),
+    (tools.tracks.set_track_name, {"track_index": 1, "name": "x"}, "Error setting track name: boom"),
+    (tools.tracks.get_track_volume, {"track_index": 1}, "Error getting track volume: boom"),
+    (tools.tracks.set_track_volume, {"track_index": 1, "volume": 0.5}, "Error setting track volume: boom"),
+    (tools.tracks.set_track_panning, {"track_index": 1, "panning": 0.0}, "Error setting track panning: boom"),
+    (tools.clips.create_clip, {"track_index": 1, "clip_index": 1}, "Error creating clip: boom"),
+    (tools.clips.add_notes_to_clip, {"track_index": 1, "clip_index": 1, "notes": []},
      "Error adding notes to clip: boom"),
-    (server.set_clip_name, {"track_index": 1, "clip_index": 1, "name": "x"},
+    (tools.clips.set_clip_name, {"track_index": 1, "clip_index": 1, "name": "x"},
      "Error setting clip name: boom"),
-    (server.set_tempo, {"tempo": 100}, "Error setting tempo: boom"),
-    (server.load_instrument_or_effect, {"track_index": 1, "uri": "u"},
+    (tools.session.set_tempo, {"tempo": 100}, "Error setting tempo: boom"),
+    (tools.browser.load_instrument_or_effect, {"track_index": 1, "uri": "u"},
      "Error loading instrument by URI: boom"),
-    (server.fire_clip, {"track_index": 1, "clip_index": 1}, "Error firing clip: boom"),
-    (server.stop_clip, {"track_index": 1, "clip_index": 1}, "Error stopping clip: boom"),
-    (server.start_playback, {}, "Error starting playback: boom"),
-    (server.stop_playback, {}, "Error stopping playback: boom"),
-    (server.get_browser_tree, {}, "Error getting browser tree: boom"),
-    (server.get_browser_items_at_path, {"path": "x"}, "Error getting browser items at path: boom"),
-    (server.list_external_plugins, {}, "Error listing external plugins: boom"),
-    (server.load_external_plugin, {"track_index": 1, "plugin_name": "Pro-Q"},
+    (tools.clips.fire_clip, {"track_index": 1, "clip_index": 1}, "Error firing clip: boom"),
+    (tools.clips.stop_clip, {"track_index": 1, "clip_index": 1}, "Error stopping clip: boom"),
+    (tools.session.start_playback, {}, "Error starting playback: boom"),
+    (tools.session.stop_playback, {}, "Error stopping playback: boom"),
+    (tools.browser.get_browser_tree, {}, "Error getting browser tree: boom"),
+    (tools.browser.get_browser_items_at_path, {"path": "x"}, "Error getting browser items at path: boom"),
+    (tools.browser.list_external_plugins, {}, "Error listing external plugins: boom"),
+    (tools.browser.load_external_plugin, {"track_index": 1, "plugin_name": "Pro-Q"},
      "Error loading external plugin: boom"),
-    (server.load_drum_kit, {"track_index": 1, "rack_uri": "r", "kit_path": "k"},
+    (tools.browser.load_drum_kit, {"track_index": 1, "rack_uri": "r", "kit_path": "k"},
      "Error loading drum kit: boom"),
-    (server.get_arrangement_info, {}, "Error getting arrangement info: boom"),
-    (server.get_cue_points, {}, "Error getting cue points: boom"),
-    (server.set_song_time, {"bar": 2}, "Error setting song time: boom"),
-    (server.set_arrangement_loop, {}, "Error setting arrangement loop: boom"),
-    (server.jump_to_cue_point, {"direction": "next"}, "Error jumping to cue point: boom"),
-    (server.create_cue_point, {"bar": 1}, "Error creating cue point: boom"),
-    (server.delete_cue_point, {"bar": 1}, "Error deleting cue point: boom"),
-    (server.create_arrangement_midi_clip, {"track_index": 1},
+    (tools.arrangement.get_arrangement_info, {}, "Error getting arrangement info: boom"),
+    (tools.arrangement.get_cue_points, {}, "Error getting cue points: boom"),
+    (tools.arrangement.set_song_time, {"bar": 2}, "Error setting song time: boom"),
+    (tools.arrangement.set_arrangement_loop, {}, "Error setting arrangement loop: boom"),
+    (tools.arrangement.jump_to_cue_point, {"direction": "next"}, "Error jumping to cue point: boom"),
+    (tools.arrangement.create_cue_point, {"bar": 1}, "Error creating cue point: boom"),
+    (tools.arrangement.delete_cue_point, {"bar": 1}, "Error deleting cue point: boom"),
+    (tools.arrangement.create_arrangement_midi_clip, {"track_index": 1},
      "Error creating arrangement MIDI clip: boom"),
-    (server.create_arrangement_audio_clip, {"track_index": 1, "file_path": "/a.wav"},
+    (tools.arrangement.create_arrangement_audio_clip, {"track_index": 1, "file_path": "/a.wav"},
      "Error creating arrangement audio clip: boom"),
-    (server.duplicate_clip_to_arrangement, {"track_index": 1, "clip_index": 1},
+    (tools.arrangement.duplicate_clip_to_arrangement, {"track_index": 1, "clip_index": 1},
      "Error duplicating clip to arrangement: boom"),
-    (server.delete_arrangement_clip, {"track_index": 1, "clip_index": 1},
+    (tools.arrangement.delete_arrangement_clip, {"track_index": 1, "clip_index": 1},
      "Error deleting arrangement clip: boom"),
-    (server.set_arrangement_clip_property, {"track_index": 1, "muted": True},
+    (tools.arrangement.set_arrangement_clip_property, {"track_index": 1, "muted": True},
      "Error setting arrangement clip property: boom"),
-    (server.set_ableton_view, {}, "Error setting view: boom"),
-    (server.control_arrangement_view, {"action": "zoom_in"},
+    (tools.session.set_ableton_view, {}, "Error setting view: boom"),
+    (tools.arrangement.control_arrangement_view, {"action": "zoom_in"},
      "Error controlling arrangement view: boom"),
-    (server.manage_clip_automation, {"track_index": 1}, "Error managing clip automation: boom"),
-    (server.get_device_parameters, {"track_index": 1}, "Error getting device parameters: boom"),
-    (server.set_device_parameter, {"track_index": 1, "parameter_index": 1},
+    (tools.arrangement.manage_clip_automation, {"track_index": 1}, "Error managing clip automation: boom"),
+    (tools.devices.get_device_parameters, {"track_index": 1}, "Error getting device parameters: boom"),
+    (tools.devices.set_device_parameter, {"track_index": 1, "parameter_index": 1},
      "Error setting device parameter: boom"),
-    (server.enable_device, {"track_index": 1}, "Error toggling device: boom"),
-    (server.disable_device, {"track_index": 1}, "Error toggling device: boom"),
-    (server.get_chain_info, {"track_index": 1}, "Error getting chain info: boom"),
-    (server.get_drum_pad_info, {"track_index": 1}, "Error getting drum pad info: boom"),
-    (server.delete_device, {"track_index": 1, "device_index": 1}, "Error deleting device: boom"),
-    (server.get_track_deletion_status, {}, "Error checking track deletion status: boom"),
-    (server.delete_track, {"track_index": 1}, "Error deleting track: boom"),
-    (server.navigate_device_preset, {"track_index": 1}, "Error navigating preset: boom"),
+    (tools.devices.enable_device, {"track_index": 1}, "Error toggling device: boom"),
+    (tools.devices.disable_device, {"track_index": 1}, "Error toggling device: boom"),
+    (tools.devices.get_chain_info, {"track_index": 1}, "Error getting chain info: boom"),
+    (tools.devices.get_drum_pad_info, {"track_index": 1}, "Error getting drum pad info: boom"),
+    (tools.devices.delete_device, {"track_index": 1, "device_index": 1}, "Error deleting device: boom"),
+    (tools.tracks.get_track_deletion_status, {}, "Error checking track deletion status: boom"),
+    (tools.tracks.delete_track, {"track_index": 1}, "Error deleting track: boom"),
+    (tools.devices.navigate_device_preset, {"track_index": 1}, "Error navigating preset: boom"),
 ]
 
 
 @pytest.mark.parametrize("tool,kwargs,expected", ERROR_CASES,
                          ids=[c[0].__name__ for c in ERROR_CASES])
 def test_tool_reports_connection_error(tool, kwargs, expected):
-    with patch.object(server, "get_ableton_connection", side_effect=Exception("boom")):
+    with patch.object(connection, "get_ableton_connection", side_effect=Exception("boom")):
         assert tool(CTX, **kwargs) == expected
 
 
 @pytest.mark.parametrize("tool,kwargs", [
-    (server.get_track_info, {"track_index": 0}),
-    (server.create_clip, {"track_index": 1, "clip_index": 0}),
-    (server.fire_clip, {"track_index": 0, "clip_index": 1}),
-    (server.set_track_volume, {"track_index": -1, "volume": 0.5}),
+    (tools.tracks.get_track_info, {"track_index": 0}),
+    (tools.clips.create_clip, {"track_index": 1, "clip_index": 0}),
+    (tools.clips.fire_clip, {"track_index": 0, "clip_index": 1}),
+    (tools.tracks.set_track_volume, {"track_index": -1, "volume": 0.5}),
 ])
 def test_tools_reject_zero_based_indices(tool, kwargs):
     out, fake = run_tool(tool, **kwargs)
@@ -279,7 +281,7 @@ class TestTrackVolume:
          ["Volume: 1.0000", "(0.25 R)"]),
     ])
     def test_get_track_volume(self, reply, expected):
-        out, fake = run_tool(server.get_track_volume, {"get_track_volume": reply}, track_index=4)
+        out, fake = run_tool(tools.tracks.get_track_volume, {"get_track_volume": reply}, track_index=4)
         assert fake.calls == [("get_track_volume", {"track_index": 3})]
         for text in expected:
             assert text in out
@@ -290,7 +292,7 @@ class TestTrackVolume:
         (0.85, {}, "Set '?' fader to 0.8500 (≈ +0.0 dB)"),
     ])
     def test_set_track_volume(self, volume, reply, expected):
-        out, fake = run_tool(server.set_track_volume, {"set_track_volume": reply},
+        out, fake = run_tool(tools.tracks.set_track_volume, {"set_track_volume": reply},
                              track_index=2, volume=volume)
         assert fake.calls == [("set_track_volume", {"track_index": 1, "volume": volume})]
         assert out == expected
@@ -299,8 +301,8 @@ class TestTrackVolume:
         "Bug: the dB readout uses 20*log10(volume/0.85) instead of Live's fader "
         "mapping, where 0.85 is 0 dB and 1.0 is about +6 dB"))
     @pytest.mark.parametrize("tool,replies,kwargs", [
-        (server.get_track_volume, {"get_track_volume": {"volume": 1.0, "panning": 0.0}}, {}),
-        (server.set_track_volume, {"set_track_volume": {"volume": 1.0}}, {"volume": 1.0}),
+        (tools.tracks.get_track_volume, {"get_track_volume": {"volume": 1.0, "panning": 0.0}}, {}),
+        (tools.tracks.set_track_volume, {"set_track_volume": {"volume": 1.0}}, {"volume": 1.0}),
     ], ids=["get", "set"])
     def test_full_fader_reads_about_plus_6_db(self, tool, replies, kwargs):
         out, _ = run_tool(tool, replies, track_index=1, **kwargs)
@@ -313,7 +315,7 @@ class TestTrackVolume:
         (0.4, "Set 'Bass' panning to 0.4000 (0.40 R)"),
     ])
     def test_set_track_panning(self, panning, expected):
-        out, fake = run_tool(server.set_track_panning,
+        out, fake = run_tool(tools.tracks.set_track_panning,
                              {"set_track_panning": {"track_name": "Bass", "panning": panning}},
                              track_index=1, panning=panning)
         assert fake.calls == [("set_track_panning", {"track_index": 0, "panning": panning})]
@@ -335,7 +337,7 @@ class TestLoadInstrument:
         ({"loaded": False}, "Failed to load instrument with URI 'query:Synths#Operator'"),
     ])
     def test_load_instrument_or_effect(self, reply, expected):
-        out, fake = run_tool(server.load_instrument_or_effect, {"load_browser_item": reply},
+        out, fake = run_tool(tools.browser.load_instrument_or_effect, {"load_browser_item": reply},
                              track_index=2, uri=self.URI)
         assert fake.calls == [("load_browser_item", {"track_index": 1, "item_uri": self.URI})]
         assert out == expected
@@ -345,26 +347,26 @@ class TestLoadDrumKit:
     KW = {"track_index": 2, "rack_uri": "rack-uri", "kit_path": "drums/acoustic"}
 
     def test_rack_load_failure(self):
-        out, fake = run_tool(server.load_drum_kit, {"load_browser_item": {"loaded": False}}, **self.KW)
+        out, fake = run_tool(tools.browser.load_drum_kit, {"load_browser_item": {"loaded": False}}, **self.KW)
         assert out == "Failed to load drum rack with URI 'rack-uri'"
         assert fake.commands() == ["load_browser_item"]
 
     def test_kit_path_error(self):
-        out, _ = run_tool(server.load_drum_kit, {
+        out, _ = run_tool(tools.browser.load_drum_kit, {
             "load_browser_item": {"loaded": True},
             "get_browser_items_at_path": {"error": "Path part 'x' not found"},
         }, **self.KW)
         assert out == "Loaded drum rack but failed to find drum kit: Path part 'x' not found"
 
     def test_no_loadable_kit(self):
-        out, _ = run_tool(server.load_drum_kit, {
+        out, _ = run_tool(tools.browser.load_drum_kit, {
             "load_browser_item": {"loaded": True},
             "get_browser_items_at_path": {"items": [{"name": "Folder", "is_loadable": False}]},
         }, **self.KW)
         assert out == "Loaded drum rack but no loadable drum kits found at 'drums/acoustic'"
 
     def test_loads_first_loadable_kit(self):
-        out, fake = run_tool(server.load_drum_kit, {
+        out, fake = run_tool(tools.browser.load_drum_kit, {
             "load_browser_item": {"loaded": True},
             "get_browser_items_at_path": {"items": [
                 {"name": "Folder", "is_loadable": False},
@@ -395,7 +397,7 @@ class TestBrowserTree:
                 {"name": "Drums"},
             ],
         }
-        out, fake = run_tool(server.get_browser_tree, {"get_browser_tree": reply},
+        out, fake = run_tool(tools.browser.get_browser_tree, {"get_browser_tree": reply},
                              category_type="all")
         assert fake.calls == [("get_browser_tree", {"category_type": "all"})]
         assert out.startswith("Browser tree for 'all' (showing 3 folders):")
@@ -405,7 +407,7 @@ class TestBrowserTree:
 
     def test_no_categories_lists_available(self):
         reply = {"categories": [], "available_categories": ["instruments", "sounds"]}
-        out, _ = run_tool(server.get_browser_tree, {"get_browser_tree": reply},
+        out, _ = run_tool(tools.browser.get_browser_tree, {"get_browser_tree": reply},
                           category_type="bogus")
         assert out == ("No categories found for 'bogus'. "
                        "Available browser categories: instruments, sounds")
@@ -416,14 +418,14 @@ class TestBrowserTree:
         ("Could not access Live application", "Error: Could not access the Ableton Live application."),
     ])
     def test_known_errors(self, message, expected):
-        out, _ = run_tool(server.get_browser_tree, {"get_browser_tree": Exception(message)})
+        out, _ = run_tool(tools.browser.get_browser_tree, {"get_browser_tree": Exception(message)})
         assert out.startswith(expected)
 
 
 class TestBrowserItemsAtPath:
     def test_returns_json(self):
         reply = {"path": "instruments", "items": [{"name": "Operator"}]}
-        out, fake = run_tool(server.get_browser_items_at_path,
+        out, fake = run_tool(tools.browser.get_browser_items_at_path,
                              {"get_browser_items_at_path": reply}, path="instruments")
         assert fake.calls == [("get_browser_items_at_path", {"path": "instruments"})]
         assert json.loads(out) == reply
@@ -431,7 +433,7 @@ class TestBrowserItemsAtPath:
     def test_unknown_category_lists_available(self):
         reply = {"error": "Unknown or unavailable category: foo",
                  "available_categories": ["instruments", "drums"]}
-        out, _ = run_tool(server.get_browser_items_at_path,
+        out, _ = run_tool(tools.browser.get_browser_items_at_path,
                           {"get_browser_items_at_path": reply}, path="foo")
         assert out == ("Error: Unknown or unavailable category: foo\n"
                        "Available browser categories: instruments, drums")
@@ -444,7 +446,7 @@ class TestBrowserItemsAtPath:
         ("Path part 'Bass' not found", "Error: Path part 'Bass' not found. Please check the path"),
     ])
     def test_known_errors(self, message, expected):
-        out, _ = run_tool(server.get_browser_items_at_path,
+        out, _ = run_tool(tools.browser.get_browser_items_at_path,
                           {"get_browser_items_at_path": Exception(message)}, path="x")
         assert out.startswith(expected)
 
@@ -459,7 +461,7 @@ class TestPluginHelpers:
         ("  Pro-Q_3  ", "pro q 3"),
     ])
     def test_normalize(self, value, expected):
-        assert server._normalize_plugin_search_text(value) == expected
+        assert plugin_discovery.normalize_plugin_search_text(value) == expected
 
     @pytest.mark.parametrize("name,query,score", [
         ("Serum", "", 1),
@@ -469,7 +471,7 @@ class TestPluginHelpers:
         ("Valhalla", "zzz", 0),
     ])
     def test_match_score(self, name, query, score):
-        assert server._plugin_match_score(name, query) == score
+        assert plugin_discovery.plugin_match_score(name, query) == score
 
     def test_collect_walks_tree_and_skips_noise(self):
         tree = {
@@ -486,7 +488,7 @@ class TestPluginHelpers:
             "plugins/VST3/Missing": {"error": "Path part 'Missing' not found"},
         }
         fake = FakeAbleton({"get_browser_items_at_path": lambda p: tree[p["path"]]})
-        plugins = server._collect_external_plugins_from_root(fake, "plugins")
+        plugins = plugin_discovery.collect_external_plugins_from_root(fake, "plugins")
         assert sorted(p["name"] for p in plugins) == ["Loose", "Serum"]
         serum = next(p for p in plugins if p["name"] == "Serum")
         assert serum == {"name": "Serum", "uri": "serum-uri", "path": "plugins/VST3/Serum",
@@ -499,38 +501,38 @@ class TestPluginHelpers:
             "plugins/A": {"items": []},
         }
         fake = FakeAbleton({"get_browser_items_at_path": lambda p: tree[p["path"]]})
-        server._collect_external_plugins_from_root(fake, "plugins")
+        plugin_discovery.collect_external_plugins_from_root(fake, "plugins")
         assert fake.sent("get_browser_items_at_path").count({"path": "plugins/A"}) == 1
 
     def test_collect_root_error_raises(self):
         fake = FakeAbleton({"get_browser_items_at_path": {"error": "Unknown category"}})
         with pytest.raises(ValueError, match="Unknown category"):
-            server._collect_external_plugins_from_root(fake, "plugins")
+            plugin_discovery.collect_external_plugins_from_root(fake, "plugins")
 
     def test_collect_respects_depth_and_safety_limits(self):
         fake = FakeAbleton({"get_browser_items_at_path": {"items": [
             {"name": "Deeper", "is_folder": True}]}})
-        server._collect_external_plugins_from_root(fake, "plugins", max_depth=2)
+        plugin_discovery.collect_external_plugins_from_root(fake, "plugins", max_depth=2)
         assert len(fake.calls) == 3
         with pytest.raises(RuntimeError, match="safety limit"):
-            server._collect_external_plugins_from_root(fake, "plugins", max_visited_paths=1)
+            plugin_discovery.collect_external_plugins_from_root(fake, "plugins", max_visited_paths=1)
 
     def test_discover_returns_empty_when_roots_exist_but_hold_nothing(self):
         fake = FakeAbleton({"get_browser_items_at_path": {"items": []}})
-        assert server._discover_external_plugins(fake) == []
+        assert plugin_discovery.discover_external_plugins(fake) == []
 
     def test_discover_raises_when_no_root_resolves(self):
         fake = FakeAbleton({"get_browser_items_at_path": {"error": "nope"}})
         with pytest.raises(ValueError, match="Could not discover external plugins"):
-            server._discover_external_plugins(fake)
+            plugin_discovery.discover_external_plugins(fake)
 
     def test_cache_is_reused_until_refresh(self):
         fake = FakeAbleton()
-        with patch.object(server, "_discover_external_plugins",
+        with patch.object(plugin_discovery, "discover_external_plugins",
                           side_effect=[[{"name": "A"}], [{"name": "B"}]]) as discover:
-            assert server._get_cached_external_plugins(fake) == [{"name": "A"}]
-            assert server._get_cached_external_plugins(fake) == [{"name": "A"}]
-            assert server._get_cached_external_plugins(fake, force_refresh=True) == [{"name": "B"}]
+            assert plugin_discovery.get_cached_external_plugins(fake) == [{"name": "A"}]
+            assert plugin_discovery.get_cached_external_plugins(fake) == [{"name": "A"}]
+            assert plugin_discovery.get_cached_external_plugins(fake, force_refresh=True) == [{"name": "B"}]
         assert discover.call_count == 2
 
 
@@ -541,7 +543,7 @@ class TestExternalPluginTools:
     ]
 
     def _run(self, fn, plugins, replies=None, **kwargs):
-        with patch.object(server, "_get_cached_external_plugins", return_value=list(plugins)):
+        with patch.object(plugin_discovery, "get_cached_external_plugins", return_value=list(plugins)):
             return run_tool(fn, replies, **kwargs)
 
     @pytest.mark.parametrize("query,expected", [
@@ -549,24 +551,24 @@ class TestExternalPluginTools:
         ("", "No external plugins were discovered."),
     ])
     def test_list_with_no_results(self, query, expected):
-        out, _ = self._run(server.list_external_plugins, [], query=query)
+        out, _ = self._run(tools.browser.list_external_plugins, [], query=query)
         assert out == expected
 
     def test_list_truncates_and_hints(self):
-        out, _ = self._run(server.list_external_plugins, self.PLUGINS, max_results=1)
+        out, _ = self._run(tools.browser.list_external_plugins, self.PLUGINS, max_results=1)
         assert "External plugins discovered: 2 total, showing 1" in out
         assert "1. Serum (path: plugins/Serum)" in out
         assert "Use max_results=2" in out
 
     @pytest.mark.parametrize("name", ["", "   "])
     def test_load_requires_name(self, name):
-        out, fake = self._run(server.load_external_plugin, self.PLUGINS,
+        out, fake = self._run(tools.browser.load_external_plugin, self.PLUGINS,
                               track_index=1, plugin_name=name)
         assert out == "Error: plugin_name is required."
         assert fake.calls == []
 
     def test_load_reports_failure(self):
-        out, fake = self._run(server.load_external_plugin, self.PLUGINS,
+        out, fake = self._run(tools.browser.load_external_plugin, self.PLUGINS,
                               {"load_browser_item": {"loaded": False}},
                               track_index=3, plugin_name="Serum", exact_match=True)
         assert out == "Failed to load external plugin 'Serum'."
@@ -586,7 +588,7 @@ class TestArrangementTools:
                 {"index": 0, "name": "Intro", "start_time": 0.0, "end_time": 16.0, "muted": True},
             ]}, {"index": 1, "name": "Vox", "is_midi": False, "arrangement_clips": []}],
         }
-        out, fake = run_tool(server.get_arrangement_info, {"get_arrangement_info": reply},
+        out, fake = run_tool(tools.arrangement.get_arrangement_info, {"get_arrangement_info": reply},
                              track_index=0)
         assert fake.calls == [("get_arrangement_info", {"track_index": -1})]
         assert "Tempo: 120.0 BPM | Time Sig: 4/4 | Playing: True | Position: bar 3" in out
@@ -596,7 +598,7 @@ class TestArrangementTools:
         assert "Track 2: Vox (Audio) — 0 clip(s)" in out
 
     def test_get_arrangement_info_single_track(self):
-        out, fake = run_tool(server.get_arrangement_info, {"get_arrangement_info": {}},
+        out, fake = run_tool(tools.arrangement.get_arrangement_info, {"get_arrangement_info": {}},
                              track_index=2)
         assert fake.calls == [("get_arrangement_info", {"track_index": 1})]
         assert "Loop:" not in out
@@ -604,11 +606,11 @@ class TestArrangementTools:
     def test_get_cue_points(self):
         replies = {"get_cue_points": {"cue_points": [{"name": "Verse", "time": 32.0}]},
                    "get_session_info": {"signature_numerator": 3, "signature_denominator": 4}}
-        out, _ = run_tool(server.get_cue_points, replies)
+        out, _ = run_tool(tools.arrangement.get_cue_points, replies)
         assert out == '=== Cue Points ===\n  "Verse" — bar 11'
 
     def test_get_cue_points_empty(self):
-        out, _ = run_tool(server.get_cue_points, {"get_session_info": SIG_4_4})
+        out, _ = run_tool(tools.arrangement.get_cue_points, {"get_session_info": SIG_4_4})
         assert out == "No cue points in this project."
 
     @pytest.mark.parametrize("kwargs,time_val,expected", [
@@ -616,7 +618,7 @@ class TestArrangementTools:
         ({"beat": 6.0}, 6.0, "Jumped to bar 2 (beat 6.0)"),
     ])
     def test_set_song_time(self, kwargs, time_val, expected):
-        out, fake = run_tool(server.set_song_time, {"get_session_info": SIG_4_4}, **kwargs)
+        out, fake = run_tool(tools.arrangement.set_song_time, {"get_session_info": SIG_4_4}, **kwargs)
         assert fake.sent("set_song_time") == [{"time": time_val}]
         assert out == expected
 
@@ -630,7 +632,7 @@ class TestArrangementTools:
         replies = {"get_session_info": SIG_4_4,
                    "set_arrangement_loop": {"enabled": params["enabled"],
                                             "start": 4.0, "length": 8.0}}
-        out, fake = run_tool(server.set_arrangement_loop, replies, **kwargs)
+        out, fake = run_tool(tools.arrangement.set_arrangement_loop, replies, **kwargs)
         assert fake.sent("set_arrangement_loop") == [params]
         state = "enabled" if params["enabled"] else "disabled"
         assert out == f"Loop {state}: bars 2-4"
@@ -640,7 +642,7 @@ class TestArrangementTools:
         ({"beat": 3.0, "name": "Pickup"}, 3.0, "bar ?"),
     ])
     def test_create_cue_point(self, kwargs, time_val, label):
-        out, fake = run_tool(server.create_cue_point, {"get_session_info": SIG_4_4}, **kwargs)
+        out, fake = run_tool(tools.arrangement.create_cue_point, {"get_session_info": SIG_4_4}, **kwargs)
         assert fake.sent("create_cue_point") == [{"time": time_val, "name": kwargs["name"]}]
         assert out == f"Created cue point '{kwargs['name']}' at {label}"
 
@@ -649,7 +651,7 @@ class TestArrangementTools:
         ({"beat": 3.0}, 3.0, "bar ?"),
     ])
     def test_delete_cue_point(self, kwargs, time_val, label):
-        out, fake = run_tool(server.delete_cue_point, {"get_session_info": SIG_4_4}, **kwargs)
+        out, fake = run_tool(tools.arrangement.delete_cue_point, {"get_session_info": SIG_4_4}, **kwargs)
         assert fake.sent("delete_cue_point") == [{"time": time_val}]
         assert out == f"Deleted cue point at {label}"
 
@@ -661,51 +663,51 @@ class TestArrangementTools:
     def test_create_arrangement_midi_clip(self, kwargs, position, length):
         replies = {"get_session_info": SIG_4_4,
                    "create_arrangement_clip": {"overlapped_clips": []}}
-        out, fake = run_tool(server.create_arrangement_midi_clip, replies,
+        out, fake = run_tool(tools.arrangement.create_arrangement_midi_clip, replies,
                              track_index=2, **kwargs)
         assert fake.sent("create_arrangement_clip") == [
             {"track_index": 1, "position": position, "length": length}]
         assert out.startswith("Created MIDI clip on track 2 at bar")
         assert f"length {length} beats" in out
-        assert out.endswith(server._ARRANGEMENT_TIP)
+        assert out.endswith(tools.arrangement.ARRANGEMENT_TIP)
 
     def test_create_arrangement_midi_clip_warns_on_overlap(self):
         replies = {"get_session_info": SIG_4_4,
                    "create_arrangement_clip": {"overlapped_clips": ["Intro", "Verse"]}}
-        out, _ = run_tool(server.create_arrangement_midi_clip, replies, track_index=1)
+        out, _ = run_tool(tools.arrangement.create_arrangement_midi_clip, replies, track_index=1)
         assert "Warning: overlapped existing clips: Intro, Verse" in out
 
     def test_create_arrangement_audio_clip(self):
-        out, fake = run_tool(server.create_arrangement_audio_clip,
+        out, fake = run_tool(tools.arrangement.create_arrangement_audio_clip,
                              {"get_session_info": SIG_4_4},
                              track_index=1, file_path="/a.wav", start_bar=2)
         assert fake.sent("create_arrangement_audio_clip") == [
             {"track_index": 0, "position": 4.0, "file_path": "/a.wav"}]
-        assert out == "Created audio clip from '/a.wav' on track 1" + server._ARRANGEMENT_TIP
+        assert out == "Created audio clip from '/a.wav' on track 1" + tools.arrangement.ARRANGEMENT_TIP
 
     def test_duplicate_clip_to_arrangement(self):
-        out, fake = run_tool(server.duplicate_clip_to_arrangement, {},
+        out, fake = run_tool(tools.arrangement.duplicate_clip_to_arrangement, {},
                              track_index=2, clip_index=3, destination_beat=12.0)
         assert fake.calls == [("duplicate_to_arrangement",
                                {"track_index": 1, "clip_index": 2, "destination_time": 12.0})]
-        assert out == "Duplicated session clip to arrangement on track 2" + server._ARRANGEMENT_TIP
+        assert out == "Duplicated session clip to arrangement on track 2" + tools.arrangement.ARRANGEMENT_TIP
 
     @pytest.mark.parametrize("kwargs,params,ref", [
         ({"clip_name": "Intro"}, {"track_index": 0, "clip_name": "Intro"}, "'Intro'"),
         ({"clip_index": 2}, {"track_index": 0, "clip_index": 1}, "#2"),
     ])
     def test_delete_arrangement_clip(self, kwargs, params, ref):
-        out, fake = run_tool(server.delete_arrangement_clip, {}, track_index=1, **kwargs)
+        out, fake = run_tool(tools.arrangement.delete_arrangement_clip, {}, track_index=1, **kwargs)
         assert fake.calls == [("delete_arrangement_clip", params)]
-        assert out == f"Deleted arrangement clip {ref} on track 1" + server._ARRANGEMENT_TIP
+        assert out == f"Deleted arrangement clip {ref} on track 1" + tools.arrangement.ARRANGEMENT_TIP
 
     def test_delete_arrangement_clip_needs_a_reference(self):
-        out, fake = run_tool(server.delete_arrangement_clip, {}, track_index=1)
+        out, fake = run_tool(tools.arrangement.delete_arrangement_clip, {}, track_index=1)
         assert out == "Error: provide clip_index or clip_name"
         assert fake.calls == []
 
     def test_set_arrangement_clip_property_sends_one_command_per_property(self):
-        out, fake = run_tool(server.set_arrangement_clip_property, {},
+        out, fake = run_tool(tools.arrangement.set_arrangement_clip_property, {},
                              track_index=2, clip_index=3, name="Hook", muted=False, gain=0.5)
         # "name" is sent last so a rename cannot break name-based lookup.
         assert fake.sent("set_arrangement_clip_property") == [
@@ -716,7 +718,7 @@ class TestArrangementTools:
         assert out == "Updated clip 3 on track 2: muted=False, gain=0.5, name=Hook"
 
     def test_set_arrangement_clip_property_nothing_to_change(self):
-        out, fake = run_tool(server.set_arrangement_clip_property, {}, track_index=1)
+        out, fake = run_tool(tools.arrangement.set_arrangement_clip_property, {}, track_index=1)
         assert out == "No properties specified to change."
         assert fake.calls == []
 
@@ -734,7 +736,7 @@ class TestDeviceTools:
     def test_get_device_parameters_summary_groups_by_category(self):
         reply = {"device_name": "Mystery Synth", "parameter_count": 2,
                  "parameters": [_param(0, "Cutoff"), _param(1, "Res")]}
-        out, fake = run_tool(server.get_device_parameters,
+        out, fake = run_tool(tools.devices.get_device_parameters,
                              {"get_device_parameters": reply}, track_index=1)
         assert fake.calls == [("get_device_parameters", {
             "track_index": 0, "device_index": 0, "chain_index": None, "show_all": True})]
@@ -748,13 +750,13 @@ class TestDeviceTools:
             _param(1, "Osc A WT Pos"),
             _param(2, "Chaos 1"),
         ]}
-        summary, _ = run_tool(server.get_device_parameters, {"get_device_parameters": reply},
+        summary, _ = run_tool(tools.devices.get_device_parameters, {"get_device_parameters": reply},
                               track_index=1)
         assert "  Filter: 1 parameters" in summary
         assert "  Oscillator A: 1 parameters" in summary
         assert "  Other: 1 parameters" in summary
 
-        detail, _ = run_tool(server.get_device_parameters, {"get_device_parameters": reply},
+        detail, _ = run_tool(tools.devices.get_device_parameters, {"get_device_parameters": reply},
                              track_index=1, category="filter")
         assert detail.splitlines()[0] == "Serum_x64 — 1 parameters"
         assert "  1. Fil Cutoff (filter cutoff): 75 % (normalized 0.75)" in detail
@@ -763,7 +765,7 @@ class TestDeviceTools:
         replies = {"get_device_parameters": {"device_name": "Serum"},
                    "set_device_parameter": {"parameter_name": "Fil Cutoff",
                                             "display_value": "40 %", "new_value": 0.4}}
-        out, fake = run_tool(server.set_device_parameter, replies,
+        out, fake = run_tool(tools.devices.set_device_parameter, replies,
                              track_index=1, parameter_name="filter cutoff", value=0.4)
         assert fake.sent("get_device_parameters") == [{
             "track_index": 0, "device_index": 0, "chain_index": None, "show_all": False}]
@@ -772,14 +774,14 @@ class TestDeviceTools:
 
     def test_get_device_parameters_unknown_category(self):
         reply = {"device_name": "Mystery Synth", "parameters": [_param(0, "Cutoff")]}
-        out, _ = run_tool(server.get_device_parameters, {"get_device_parameters": reply},
+        out, _ = run_tool(tools.devices.get_device_parameters, {"get_device_parameters": reply},
                           track_index=1, category="Filter")
         assert out == "No parameters found in category 'Filter'. Available categories: Other"
 
     def test_get_device_parameters_detail_marks_disabled(self):
         reply = {"device_name": "Mystery Synth",
                  "parameters": [_param(0, "Cutoff", value=0.256, display="2 kHz", enabled=False)]}
-        out, _ = run_tool(server.get_device_parameters, {"get_device_parameters": reply},
+        out, _ = run_tool(tools.devices.get_device_parameters, {"get_device_parameters": reply},
                           track_index=1, category="other")
         assert "  1. Cutoff: 2 kHz (normalized 0.26) [disabled]" in out
 
@@ -791,7 +793,7 @@ class TestDeviceTools:
         replies = {"get_device_parameters": {"device_name": "Mystery Synth"},
                    "set_device_parameter": {"parameter_name": "Cutoff", "display_value": "1 kHz",
                                             "new_value": 0.5, "clamped": True}}
-        out, fake = run_tool(server.set_device_parameter, replies,
+        out, fake = run_tool(tools.devices.set_device_parameter, replies,
                              track_index=1, device_index=2, value=1.5, **kwargs)
         assert fake.sent("set_device_parameter") == [{
             "track_index": 0, "device_index": 1, "chain_index": None,
@@ -799,7 +801,7 @@ class TestDeviceTools:
         assert out == "Set Cutoff to 1 kHz (normalized 0.5) (value was clamped to 0.0-1.0 range)"
 
     def test_toggle_device_by_name_not_found(self):
-        out, fake = run_tool(server.enable_device,
+        out, fake = run_tool(tools.devices.enable_device,
                              {"get_track_info": {"devices": [{"name": "EQ Eight", "index": 0}]}},
                              track_index=1, device_name="Reverb")
         assert out == "Error: Device 'Reverb' not found on track 1"
@@ -807,7 +809,7 @@ class TestDeviceTools:
 
     def test_toggle_device_by_name_ambiguous(self):
         devices = [{"name": "Reverb", "index": 0}, {"name": "reverb", "index": 2}]
-        out, _ = run_tool(server.disable_device, {"get_track_info": {"devices": devices}},
+        out, _ = run_tool(tools.devices.disable_device, {"get_track_info": {"devices": devices}},
                           track_index=1, device_name="REVERB")
         assert out == ("Error: Multiple devices named 'REVERB' on track 1: "
                        "Reverb (index 1), reverb (index 3)")
@@ -816,14 +818,14 @@ class TestDeviceTools:
         replies = {"get_track_info": {"devices": [{"name": "EQ", "index": 0},
                                                   {"name": "Reverb", "index": 1}]},
                    "set_device_enabled": {"device_name": "Reverb", "is_active": False}}
-        out, fake = run_tool(server.disable_device, replies, track_index=2, device_name="reverb")
+        out, fake = run_tool(tools.devices.disable_device, replies, track_index=2, device_name="reverb")
         assert fake.sent("set_device_enabled") == [
             {"track_index": 1, "device_index": 1, "chain_index": None, "enabled": False}]
         assert out == "Reverb disabled"
 
     def test_toggle_device_defaults_to_first_device(self):
         replies = {"set_device_enabled": {"device_name": "EQ", "is_active": True}}
-        out, fake = run_tool(server.enable_device, replies, track_index=1, chain_index=2)
+        out, fake = run_tool(tools.devices.enable_device, replies, track_index=1, chain_index=2)
         assert fake.calls == [("set_device_enabled", {
             "track_index": 0, "device_index": 0, "chain_index": 1, "enabled": True})]
         assert out == "EQ enabled"
@@ -835,7 +837,7 @@ class TestDeviceTools:
             {"index": 1, "name": "Empty", "mute": False, "solo": True, "device_count": 0,
              "devices": []},
         ]}
-        out, fake = run_tool(server.get_chain_info, {"get_chain_info": reply}, track_index=1)
+        out, fake = run_tool(tools.devices.get_chain_info, {"get_chain_info": reply}, track_index=1)
         assert fake.calls == [("get_chain_info",
                                {"track_index": 0, "device_index": 0, "chain_index": None})]
         assert "Instrument Rack — 2 chains" in out
@@ -847,7 +849,7 @@ class TestDeviceTools:
             {"index": 0, "name": "Electric", "type": "instrument", "parameter_count": 40},
             {"index": 1, "name": "Chorus", "type": "audio_effect", "is_active": False},
         ]}
-        out, fake = run_tool(server.get_chain_info, {"get_chain_info": reply},
+        out, fake = run_tool(tools.devices.get_chain_info, {"get_chain_info": reply},
                              track_index=1, device_index=2, chain_index=1)
         assert fake.calls == [("get_chain_info",
                                {"track_index": 0, "device_index": 1, "chain_index": 0})]
@@ -861,7 +863,7 @@ class TestDeviceTools:
              "chains": [{"devices": [{"name": "Simpler"}]}]},
             {"note": 38, "name": "Snare", "solo": True, "chains": []},
         ]}
-        out, fake = run_tool(server.get_drum_pad_info, {"get_drum_pad_info": reply},
+        out, fake = run_tool(tools.devices.get_drum_pad_info, {"get_drum_pad_info": reply},
                              track_index=1)
         assert fake.calls == [("get_drum_pad_info", {"track_index": 0, "device_index": 0})]
         assert "Drum Rack — 2 filled pads" in out
@@ -869,25 +871,25 @@ class TestDeviceTools:
         assert "  Note 38: Snare [solo] → empty" in out
 
     def test_delete_device_by_name_not_found(self):
-        out, _ = run_tool(server.delete_device, {"get_track_info": {"devices": []}},
+        out, _ = run_tool(tools.devices.delete_device, {"get_track_info": {"devices": []}},
                           track_index=1, device_name="Reverb")
         assert out == "Error: Device 'Reverb' not found on track 1"
 
     def test_delete_device_by_name_ambiguous(self):
         devices = [{"name": "Reverb", "index": 0}, {"name": "Reverb", "index": 1}]
-        out, _ = run_tool(server.delete_device, {"get_track_info": {"devices": devices}},
+        out, _ = run_tool(tools.devices.delete_device, {"get_track_info": {"devices": devices}},
                           track_index=1, device_name="Reverb")
         assert out == "Error: Multiple devices named 'Reverb': Reverb (index 1), Reverb (index 2)"
 
     def test_delete_device_by_name(self):
         replies = {"get_track_info": {"devices": [{"name": "Reverb", "index": 4}]},
                    "delete_device": {"deleted_device": "Reverb", "remaining_devices": 4}}
-        out, fake = run_tool(server.delete_device, replies, track_index=1, device_name="Reverb")
+        out, fake = run_tool(tools.devices.delete_device, replies, track_index=1, device_name="Reverb")
         assert fake.sent("delete_device") == [{"track_index": 0, "device_index": 4}]
         assert out == "Deleted Reverb. 4 devices remaining."
 
     def test_delete_device_defaults_to_first(self):
-        out, fake = run_tool(server.delete_device, {}, track_index=2)
+        out, fake = run_tool(tools.devices.delete_device, {}, track_index=2)
         assert fake.calls == [("delete_device", {"track_index": 1, "device_index": 0})]
         assert out == "Deleted device. ? devices remaining."
 
@@ -897,14 +899,14 @@ class TestDeviceTools:
 
 class TestDeleteTrack:
     def test_needs_index_or_name(self):
-        out, fake = run_tool(server.delete_track, {"get_session_info": {"track_count": 3}})
+        out, fake = run_tool(tools.tracks.delete_track, {"get_session_info": {"track_count": 3}})
         assert out == "Error: provide either track_index (1-based) or track_name."
         assert fake.commands() == ["get_session_info"]
 
     def test_unknown_name(self):
         replies = {"get_session_info": {"track_count": 2},
                    "get_track_info": [{"name": "Drums"}, {"name": "Bass"}]}
-        out, fake = run_tool(server.delete_track, replies, track_name="Vox")
+        out, fake = run_tool(tools.tracks.delete_track, replies, track_name="Vox")
         assert out == "Error: No track named 'Vox' found."
         assert fake.sent("get_track_info") == [{"track_index": 0}, {"track_index": 1}]
         assert "delete_track" not in fake.commands()
