@@ -29,7 +29,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node is not installed")
 # Builds the fake world, then the driver source is appended and run() is
 # called with the JSON command passed on argv.
 _PRELUDE = r"""
-var LOG = {keys: [], pressed: []};
+var LOG = {keys: [], pressed: [], clicked: []};
 var WORLD = JSON.parse(process.argv[2]);
 function delay() {}
 function mk(spec) {
@@ -43,7 +43,6 @@ function mk(spec) {
   var valueFn = function () { return spec.value; };
   Object.defineProperty(o, 'value', {get: function () { return valueFn; }, set: function () {}});
   o.enabled = function () { return spec.enabled !== false; };
-  o.menus = function () { return []; };
   o.sheets = [];
   o.attributes = {byName: function () { return {value: function () { return !!spec.modal; }}; }};
   o.entireContents = function () {
@@ -86,7 +85,16 @@ var ACTIONS = {
 var FAKE_PROC = {
   windows: function () { return windows; },
   frontmost: function () { return true; },
-  menuBars: []
+  menuBars: [{menuBarItems: {byName: function (menu) {
+    return {menus: [{menuItems: function () {
+      if (!(WORLD.menus || {})[menu]) throw new Error("Can't get object.");
+      return WORLD.menus[menu].map(function (item) {
+        return {name: function () { return item.name; },
+                enabled: function () { return item.enabled !== false; },
+                click: function () { LOG.clicked.push(menu + ' > ' + item.name); }};
+      });
+    }}]};
+  }}}]
 };
 function Application(name) {
   if (name !== 'System Events') return {activate: function () {}};
@@ -193,3 +201,70 @@ def test_status_reports_windows_and_modal_flag():
     assert reply["running"] is True
     assert reply["windows"][0] == {"name": "Export Audio/Video", "subrole": "AXDialog",
                                    "modal": True, "sheets": 0}
+
+
+def untitled_windows_world():
+    """An untitled window that was already open, listed before Live's untitled alert."""
+    return {"windows": [
+        {"role": "AXWindow", "subrole": "AXUnknown", "name": "", "kids": [
+            {"role": "AXStaticText", "value": "Info View"}]},
+        {"role": "AXWindow", "subrole": "AXDialog", "name": "", "kids": [
+            {"role": "AXGroup", "kids": [
+                {"role": "AXStaticText", "value": "The file could not be written."}]},
+            {"role": "AXButton", "description": "OK"}]},
+        {"role": "AXWindow", "subrole": "AXStandardWindow", "name": "Untitled", "kids": [
+            {"role": "AXStaticText", "value": "1 Audio"}]},
+    ]}
+
+
+def test_texts_reads_every_untitled_window():
+    # Regression: only the first untitled window was read, so an untitled
+    # alert listed after an older untitled window was never seen.
+    reply = drive("texts", untitled_windows_world(), window="")
+    assert reply["ok"] is True, reply
+    assert reply["texts"] == ["Info View", "The file could not be written."]
+
+
+def test_texts_of_a_titled_window_are_only_its_own():
+    reply = drive("texts", untitled_windows_world(), window="Untitled")
+    assert reply["texts"] == ["1 Audio"]
+
+
+def test_texts_of_a_window_that_is_not_open_are_empty():
+    reply = drive("texts", untitled_windows_world(), window="Alert")
+    assert reply["ok"] is True, reply
+    assert reply["texts"] == []
+
+
+def menu_world(select_loop_enabled=True):
+    world = export_dialog_world()
+    world["menus"] = {
+        "Navigate": [{"name": "Session View"}, {"name": "Arrangement View"}],
+        "Edit": [{"name": "Select All"}, {"name": "Select Loop", "enabled": select_loop_enabled}],
+    }
+    return world
+
+
+def test_menu_clicks_an_enabled_item():
+    reply = drive("menu", menu_world(), path=["Navigate", "Arrangement View"])
+    assert reply["ok"] is True, reply
+    assert reply["clicked"] == "Arrangement View"
+    assert reply["_log"]["clicked"] == ["Navigate > Arrangement View"]
+
+
+def test_menu_does_not_click_a_disabled_item():
+    reply = drive("menu", menu_world(select_loop_enabled=False), path=["Edit", "Select Loop"])
+    assert reply["ok"] is False
+    assert reply["disabled"] is True
+    assert reply["error"] == "menu item 'Edit > Select Loop' is disabled"
+    assert reply["_log"]["clicked"] == []
+
+
+def test_menu_reports_a_missing_item_and_a_missing_menu():
+    reply = drive("menu", menu_world(), path=["Edit", "Select Loop Brace"])
+    assert reply["ok"] is False and reply["missing"] is True
+    assert reply["_log"]["clicked"] == []
+
+    reply = drive("menu", menu_world(), path=["View", "Arrangement View"])
+    assert reply["ok"] is False
+    assert reply["_log"]["clicked"] == []

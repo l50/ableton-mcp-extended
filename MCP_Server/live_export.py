@@ -10,8 +10,9 @@ Flow:
 
 1. Check Live is running and not already showing a dialog, then bring it
    to the front.
-2. Optionally run Edit > Select Loop so the dialog pre-fills Render Start and
-   Render Length from the loop brace.
+2. Optionally give the Arrangement keyboard focus (Navigate > Arrangement
+   View) and run Edit > Select Loop, so the dialog pre-fills Render Start
+   and Render Length from the loop brace.
 3. Open File > Export Audio/Video (falling back to Cmd+Shift+R).
 4. Set the dialog's controls (Rendered Track, Encode PCM / MP3, File Type,
    Bit Depth, Sample Rate, Normalize, Create Video), re-reading each one and
@@ -52,6 +53,9 @@ FILE_MENU = "File"
 EXPORT_MENU_ITEM = "Export Audio/Video"
 EDIT_MENU = "Edit"
 SELECT_LOOP_MENU_ITEM = "Select Loop"
+# Live's "Move Focus to the Arrangement View" command (Option+2).
+NAVIGATE_MENU = "Navigate"
+ARRANGEMENT_VIEW_MENU_ITEM = "Arrangement View"
 # Live's documented shortcut for File > Export Audio/Video (manual 5.1.3).
 EXPORT_SHORTCUT = {"key": "r", "modifiers": ["command down", "shift down"]}
 
@@ -286,12 +290,15 @@ function windowInfo(w) {
     sheets: safe(function () { return w.sheets.length; }, 0)
   };
 }
+function windowsNamed(p, name) {
+  return p.windows().filter(function (w) {
+    return safe(function () { return w.name(); }, '') === name;
+  });
+}
 function findWindow(p, name) {
-  var ws = p.windows();
-  for (var i = 0; i < ws.length; i++) {
-    if (safe(function () { return ws[i].name(); }, '') === name) return ws[i];
-  }
-  throw new Error("Live window '" + name + "' is not open");
+  var ws = windowsNamed(p, name);
+  if (ws.length === 0) throw new Error("Live window '" + name + "' is not open");
+  return ws[0];
 }
 function labelsOf(el) {
   return [safe(function () { return el.description(); }, ''),
@@ -314,8 +321,8 @@ function press(el) {
 }
 function toggleState(el) {
   var v = norm(safe(function () { return el.value(); }, ''));
-  if (v === 'on' || v === '1' || v === 'true') return true;
-  if (v === 'off' || v === '0' || v === 'false') return false;
+  if (v === 'on') return true;
+  if (v === 'off') return false;
   return null;
 }
 function matches(value, values) {
@@ -323,13 +330,12 @@ function matches(value, values) {
   for (var i = 0; i < values.length; i++) if (norm(values[i]) === v) return true;
   return false;
 }
-function menuItemsOf(p, el) {
+function menuItemsOf(p) {
   // Live 12 opens a chooser's list as a new untitled AXUnknown window of
   // AXMenuItems (the current choice is prefixed with a check mark). Untitled
   // AXUnknown windows can already be open, so scan them all for menu items
   // instead of looking for a window that is new by name.
   var items = [];
-  safe(function () { el.menus().forEach(function (m) { items = items.concat(m.menuItems()); }); }, null);
   var ws = safe(function () { return p.windows(); }, []);
   for (var i = 0; i < ws.length; i++) {
     if (safe(function () { return ws[i].subrole(); }, '') !== 'AXUnknown') continue;
@@ -343,7 +349,7 @@ function menuItemsOf(p, el) {
 function pickFromMenu(p, el, values) {
   press(el);
   delay(0.6);
-  var items = menuItemsOf(p, el);
+  var items = menuItemsOf(p);
   var seen = [];
   for (var i = 0; i < items.length; i++) {
     var name = String(safe(function () { return items[i].name(); }, ''));
@@ -412,11 +418,16 @@ function dispatch(cmd) {
       return {};
     case 'controls':
       return {controls: controlList(findWindow(p, cmd.window))};
-    case 'texts':
-      return {texts: textsOf(findWindow(p, cmd.window))};
+    case 'texts': {
+      // Every window with this name: a name does not single one out, and
+      // Live's untitled windows all share the name ''.
+      var texts = [];
+      windowsNamed(p, cmd.window).forEach(function (x) { texts = texts.concat(textsOf(x)); });
+      return {texts: texts};
+    }
     case 'set_toggle': {
       var w = findWindow(p, cmd.window);
-      var el = findControl(w, cmd.label, ['AXButton', 'AXCheckBox']);
+      var el = findControl(w, cmd.label, ['AXButton']);
       var before = toggleState(el);
       var enabled = safe(function () { return el.enabled(); }, true);
       if (before === cmd.on) return {before: before, after: before, enabled: enabled};
@@ -428,7 +439,7 @@ function dispatch(cmd) {
     }
     case 'set_choice': {
       var w = findWindow(p, cmd.window);
-      var el = findControl(w, cmd.label, ['AXPopUpButton', 'AXComboBox', 'AXMenuButton']);
+      var el = findControl(w, cmd.label, ['AXPopUpButton']);
       var before = String(safe(function () { return el.value(); }, ''));
       if (matches(before, cmd.values)) return {before: before, after: before};
       if (!safe(function () { return el.enabled(); }, true))
@@ -678,13 +689,27 @@ class LiveExporter:
         except Exception:  # best effort while already failing
             pass
 
-    def _new_window_texts(self, baseline: Sequence[str]) -> Dict[str, List[str]]:
+    def _texts(self, name: str) -> List[str]:
+        """Static text of every window with this name ('' for the untitled ones)."""
+        return self._call("texts", window=name).get("texts", [])
+
+    def _new_window_texts(
+        self, extra: Sequence[str], untitled_shown: Sequence[str]
+    ) -> Dict[str, List[str]]:
+        """What the windows opened since baseline say, by window name.
+
+        Untitled windows cannot be told apart, so all of them are read and the
+        text the ones open at baseline already showed is left out.
+        """
         texts: Dict[str, List[str]] = {}
-        for name in _extra_windows(self._status(), baseline):
+        for name in dict.fromkeys(extra):
             try:
-                texts[name or "(untitled)"] = self._call("texts", window=name).get("texts", [])
+                found = self._texts(name)
             except ExportError:
                 continue
+            if not name:
+                found = [t for t in found if t not in untitled_shown]
+            texts[name or "(untitled)"] = found
         return texts
 
     def run(self, request: ExportRequest) -> Dict[str, Any]:
@@ -736,13 +761,18 @@ class LiveExporter:
             raise ExportError("Ableton Live did not come to the front; export needs Live frontmost")
 
         if request.select_loop:
+            # Select Loop acts on the view that has keyboard focus.
+            self._require(
+                self._call("menu", path=[NAVIGATE_MENU, ARRANGEMENT_VIEW_MENU_ITEM]),
+                "could not give the Arrangement keyboard focus",
+            )
             self._require(
                 self._call("menu", path=[EDIT_MENU, SELECT_LOOP_MENU_ITEM]),
-                "could not select the loop for the render range (the Arrangement "
-                "must be showing and have keyboard focus)",
+                "could not select the loop for the render range",
             )
 
         baseline = _window_names(self._status())
+        untitled_shown = self._texts("") if "" in baseline else []
         opened = self._call("menu", path=[FILE_MENU, EXPORT_MENU_ITEM])
         if not opened.get("ok") and opened.get("missing"):
             # Menu item renamed or localized: fall back to the shortcut.
@@ -767,7 +797,9 @@ class LiveExporter:
                 "could not press Export",
             )
             if not self._wait_for_window(SAVE_PANEL_TITLE, request.dialog_timeout):
-                texts = self._new_window_texts(baseline)
+                texts = self._new_window_texts(
+                    _extra_windows(self._status(), baseline), untitled_shown
+                )
                 if texts:
                     result["dialog_text"] = texts
                 raise ExportError(
@@ -790,7 +822,7 @@ class LiveExporter:
             self._cancel(EXPORT_DIALOG_TITLE)
             raise
 
-        path = self._wait_for_render(request, baseline, start_wall, result)
+        path = self._wait_for_render(request, baseline, untitled_shown, start_wall, result)
         result["output_path"] = path
         result["output_files"] = [path]
         self._verify_audio(request, path, result)
@@ -841,6 +873,7 @@ class LiveExporter:
         self,
         request: ExportRequest,
         baseline: Sequence[str],
+        untitled_shown: Sequence[str],
         start_wall: float,
         result: Dict[str, Any],
     ) -> str:
@@ -853,15 +886,10 @@ class LiveExporter:
             if not status.get("running"):
                 raise ExportError("Ableton Live quit during the export")
             extra = _extra_windows(status, baseline)
-            for name in extra:
-                if name in (EXPORT_DIALOG_TITLE, SAVE_PANEL_TITLE):
-                    continue
-                try:
-                    texts = self._call("texts", window=name).get("texts", [])
-                except ExportError:
-                    continue
+            alerts = [n for n in extra if n not in (EXPORT_DIALOG_TITLE, SAVE_PANEL_TITLE)]
+            for name, texts in self._new_window_texts(alerts, untitled_shown).items():
                 if any(_ERROR_WORDS.search(t) for t in texts):
-                    result["dialog_text"] = {name or "(untitled)": texts}
+                    result["dialog_text"] = {name: texts}
                     raise ExportError("Live reported an error during export: " + " | ".join(texts))
 
             found = None
@@ -880,7 +908,7 @@ class LiveExporter:
                 if not extra and stable >= STABLE_POLLS - 1:
                     return found
             if self.clock.monotonic() >= deadline:
-                texts = self._new_window_texts(baseline)
+                texts = self._new_window_texts(extra, untitled_shown)
                 if texts:
                     result["dialog_text"] = texts
                 if found:
