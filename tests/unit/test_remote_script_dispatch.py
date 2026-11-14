@@ -52,8 +52,8 @@ NOTES = [{"pitch": 60, "start_time": 0.0, "duration": 1.0, "velocity": 100, "mut
 # (command, params, handler attribute, expected positional args)
 READ_COMMANDS = [
     ("get_session_info", {}, "_get_session_info", ()),
-    ("get_track_info", {"track_index": 2}, "_get_track_info", (2,)),
-    ("get_track_info", {}, "_get_track_info", (0,)),
+    ("get_track_info", {"track_index": 2}, "_get_track_info", (2, True)),
+    ("get_track_info", {}, "_get_track_info", (0, True)),
     ("get_track_volume", {"track_index": 4}, "_get_track_volume", (4,)),
     ("get_browser_item", {"uri": "u", "path": "p"}, "_get_browser_item", ("u", "p")),
     ("get_browser_tree", {"category_type": "drums"}, "get_browser_tree", ("drums",)),
