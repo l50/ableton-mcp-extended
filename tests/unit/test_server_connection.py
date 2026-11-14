@@ -23,7 +23,7 @@ if "MCP_Server.server" not in sys.modules:
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from MCP_Server import server  # noqa: E402
-from MCP_Server import app, connection, plugin_discovery  # noqa: E402
+from MCP_Server import app, connection, plugin_discovery, supervisor  # noqa: E402
 
 
 class _FakeSocket:
@@ -320,15 +320,18 @@ class TestEntryPoint:
     def test_uses_the_package_supervisor(self):
         assert server.supervisor is sys.modules["MCP_Server.supervisor"]
 
-    def test_runs_by_path_as_the_mcp_config_does(self):
+    def test_runs_by_path_as_the_mcp_config_does(self, tmp_path):
         # Claude's MCP config runs `python <checkout>/MCP_Server/server.py`.
         # As a worker on a closed stdin it imports everything and exits cleanly.
+        log_file = tmp_path / "worker.log"
         proc = subprocess.run(
             [sys.executable, os.path.abspath(server.__file__), "--worker"],
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(server.__file__))),
+            env={**os.environ, supervisor.LOG_ENV: str(log_file)},
         )
         assert proc.returncode == 0, proc.stderr
+        assert log_file.exists()
 
     def test_run_worker_sets_up_logging_and_runs_mcp(self):
         fake_sup = MagicMock()
@@ -351,22 +354,20 @@ class TestEntryPoint:
         else:
             monkeypatch.setenv("ABLETON_MCP_NO_SUPERVISOR", env)
         with patch.object(server, "_run_worker") as run_worker, \
-                patch.object(server, "supervisor") as sup:
+                patch.object(supervisor, "run_supervisor") as run_supervisor:
             server.main()
         run_worker.assert_called_once()
-        sup.run_supervisor.assert_not_called()
+        run_supervisor.assert_not_called()
 
     def test_main_launches_supervisor_with_worker_command(self, monkeypatch):
         monkeypatch.setattr(sys, "argv", ["server.py"])
         monkeypatch.delenv("ABLETON_MCP_NO_SUPERVISOR", raising=False)
-        fake_sup = MagicMock()
-        fake_sup.run_supervisor.return_value = 3
-        with patch.object(server, "supervisor", fake_sup):
+        with patch.object(supervisor, "run_supervisor", return_value=3) as run_supervisor:
             with pytest.raises(SystemExit) as exc:
                 server.main()
         assert exc.value.code == 3
         server_file = os.path.abspath(server.__file__)
-        fake_sup.run_supervisor.assert_called_once_with(
+        run_supervisor.assert_called_once_with(
             [sys.executable, server_file, "--worker"],
             cwd=os.path.dirname(os.path.dirname(server_file)),
         )

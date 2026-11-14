@@ -41,6 +41,9 @@ test = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
 ]
+dev = [
+    "ruff>=0.15",
+]
 
 [tool.pytest.ini_options]
 markers = [
@@ -61,11 +64,12 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "if TYPE_CHECKING:",
 ]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-# Lint and format the MCP server package. live_export.py is excluded while a
-# separate branch is editing it.
+# Lint and format the MCP server package. live_export.py is excluded because
+# it does not conform to these rules yet.
 include = ["MCP_Server/**/*.py"]
 extend-exclude = ["MCP_Server/live_export.py"]
 

@@ -33,7 +33,6 @@ from MCP_Server import supervisor, tools  # noqa: E402,F401  (importing tools re
 from MCP_Server.app import mcp  # noqa: E402
 
 WORKER_FLAG = "--worker"
-NO_SUPERVISOR_ENV = "ABLETON_MCP_NO_SUPERVISOR"
 
 
 def _run_worker() -> None:
@@ -46,7 +45,7 @@ def _run_worker() -> None:
 
 def main() -> None:
     """Run the worker in-process or supervise a worker subprocess."""
-    if WORKER_FLAG in sys.argv[1:] or os.environ.get(NO_SUPERVISOR_ENV):
+    if WORKER_FLAG in sys.argv[1:] or os.environ.get(supervisor.NO_SUPERVISOR_ENV):
         _run_worker()
         return
     server_path = os.path.abspath(__file__)
