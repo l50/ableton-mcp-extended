@@ -41,7 +41,9 @@ function mk(spec) {
   o.name = function () { return spec.name || ''; };
   // Live ignores AXValue writes, so assigning el.value does nothing.
   var valueFn = function () { return spec.value; };
-  Object.defineProperty(o, 'value', {get: function () { return valueFn; }, set: function () {}});
+  // Text fields (spec.writable) do take writes.
+  Object.defineProperty(o, 'value', {get: function () { return valueFn; },
+    set: function (v) { if (spec.writable) spec.value = v; }});
   o.enabled = function () { return spec.enabled !== false; };
   o.sheets = [];
   o.attributes = {byName: function () { return {value: function () { return !!spec.modal; }}; }};
@@ -70,14 +72,15 @@ var ACTIONS = {
     var menu = mk({role: 'AXWindow', subrole: 'AXUnknown', name: '', kids: [
       {role: 'AXGroup', description: 'menu', kids: popup.spec.options.map(function (opt, i) {
         var current = popup.spec.selected === undefined ? opt === popup.spec.value : i === popup.spec.selected;
+        var mark = popup.spec.mark === undefined ? '✔ ' : popup.spec.mark;
         return {role: 'AXMenuItem', description: 'menu item', target: popup.spec.description,
-                index: i, name: (current ? '✔ ' : '') + opt, press: 'choose'};
+                index: i, option: opt, name: (current ? mark : '') + opt, press: 'choose'};
       })}]});
     windows.unshift(menu);
   },
   choose: function (item) {
     var popup = byDesc(item.spec.target);
-    popup.spec.value = item.spec.name.replace(/^✔ /, '');
+    popup.spec.value = item.spec.option;
     popup.spec.selected = item.spec.index;
     windows = windows.filter(function (w) {
       return !w.entireContents().some(function (c) { return c.role() === 'AXMenuItem'; });
@@ -99,19 +102,43 @@ var FAKE_PROC = {
     }}]};
   }}}]
 };
+// The driver asks Foundation for a folder's Finder display name; the world
+// gives them per path as {file: displayNameAtPath, url: NSURLLocalizedNameKey}.
+var DISPLAY = WORLD.display_names || {};
+var ObjC = {import: function () {}, unwrap: function (x) { return x; }};
+function Ref() { return []; }
+var $ = {
+  NSURLLocalizedNameKey: 'NSURLLocalizedNameKey',
+  NSFileManager: {defaultManager: {displayNameAtPath: function (p) {
+    return {js: (DISPLAY[p] || {}).file || p.split('/').pop()};
+  }}},
+  NSURL: {fileURLWithPath: function (p) {
+    return {getResourceValueForKeyError: function (ref) { ref[0] = (DISPLAY[p] || {}).url || null; return true; }};
+  }}
+};
 function Application(name) {
   if (name !== 'System Events') return {activate: function () {}};
   return {
     processes: {whose: function () { return [FAKE_PROC]; }},
     keyCode: function (code) {
       LOG.keys.push(code);
+      if (code === 36) windows.forEach(function (w) { w.sheets = []; });  // Return: go
       if (code === 53) {  // Esc: close an open menu window only
         windows = windows.filter(function (w) {
           return !w.entireContents().some(function (c) { return c.role() === 'AXMenuItem'; });
         });
       }
     },
-    keystroke: function (k) { LOG.keys.push(k); },
+    keystroke: function (k, opts) {
+      LOG.keys.push(k);
+      // Cmd+Shift+G opens the Go to Folder sheet on the Save panel.
+      if (k === 'g' && opts && (opts.using || []).indexOf('command down') >= 0) {
+        windows.forEach(function (w) {
+          if (w.name() === 'Save') w.sheets = [mk({role: 'AXSheet', kids: [
+            {role: 'AXTextField', description: 'path', writable: true}]})];
+        });
+      }
+    },
     click: function (el) { el.actions.byName('AXPress').perform(); }
   };
 }
@@ -345,3 +372,92 @@ def test_set_choice_first_fails_when_the_list_does_not_open():
     assert reply["error"] == ("the first entry in the 'Rendered Track Chooser' list is "
                               "missing, expected Main or Master")
     assert reply["_selected"]["Rendered Track Chooser"] == 4
+
+
+@pytest.mark.parametrize("mark", ["\u2714\ufe0e", "\u2714\ufe0e ", "\u2714 ", "\u2713", "\u2713 "])
+def test_set_choice_first_accepts_any_check_mark_on_the_top_entry(mark):
+    # Live's check mark may carry a variation selector (U+FE0E) and a space;
+    # every leading character that is not a letter or digit is dropped.
+    world = rendered_track_world(TRACK_LIST, selected=0)
+    world["windows"][0]["kids"][0]["mark"] = mark
+    reply = choose_main(world)
+    assert reply["ok"] is True, reply
+    assert reply["seen"] == [mark + "Main"]
+    assert reply["picked"] == "Main"
+    assert reply["_selected"]["Rendered Track Chooser"] == 0
+
+
+@pytest.mark.parametrize("mark", ["\u2714\ufe0e", "\u2714 "])
+def test_set_choice_matches_a_checked_entry_that_is_not_first(mark):
+    # The chooser reads a value that is not wanted, so the list is opened and
+    # the checked entry is matched by name despite its mark.
+    world = export_dialog_world()
+    chooser = world["windows"][0]["kids"][1]
+    chooser.update(value="unknown", selected=2, mark=mark)
+    reply = drive("set_choice", world, window="Export Audio/Video",
+                  label="Sample Rate", values=["44100"])
+    assert reply["ok"] is True, reply
+    assert mark + "44100" in reply["seen"]
+    assert reply["picked"] == "44100"
+    assert reply["after"] == "44100"
+
+
+def save_panel_world(where, display_names=None):
+    """Live's Save panel: a writable Save As field and a read-only Where pop-up."""
+    return {"windows": [
+        {"role": "AXWindow", "subrole": "AXDialog", "name": "Save", "kids": [
+            {"role": "AXTextField", "description": "Save As:", "value": "", "writable": True},
+            {"role": "AXPopUpButton", "description": "Where:", "value": where},
+            {"role": "AXButton", "description": "Cancel"},
+            {"role": "AXButton", "description": "Save"},
+        ]},
+        {"role": "AXWindow", "subrole": "AXStandardWindow", "name": "Untitled"},
+    ], "display_names": display_names or {}}
+
+
+def save(world, directory):
+    return drive("save_panel", world, window="Save", directory=directory, filename="song",
+                 folder_name=os.path.basename(directory.rstrip("/")), replace=False)
+
+
+def test_save_panel_accepts_the_on_disk_folder_name():
+    reply = save(save_panel_world("live-test"), "/tmp/x/live-test")
+    assert reply["ok"] is True, reply
+    assert reply["where"] == "live-test"
+    assert reply["_values"]["Save As:"] == "song"
+    assert reply["_log"]["pressed"] == ["Save"]
+
+
+@pytest.mark.parametrize("where", ["Desktop \u2014 iCloud", "Desktop \u2013 iCloud", "Desktop - iCloud"])
+def test_save_panel_accepts_a_synced_folder_with_an_icloud_suffix(where):
+    # Regression: Desktop and Documents synced to iCloud show as
+    # "Desktop — iCloud", which failed an otherwise correct export.
+    reply = save(save_panel_world(where), "/Users/me/Desktop")
+    assert reply["ok"] is True, reply
+    assert reply["where"] == where
+    assert reply["_log"]["pressed"] == ["Save"]
+
+
+def test_save_panel_accepts_the_finder_display_name_of_icloud_drive():
+    path = "/Users/me/Library/Mobile Documents/com~apple~CloudDocs"
+    world = save_panel_world("iCloud Drive", {path: {"url": "iCloud Drive"}})
+    reply = save(world, path)
+    assert reply["ok"] is True, reply
+    assert reply["_log"]["pressed"] == ["Save"]
+
+
+def test_save_panel_accepts_a_localized_display_name():
+    path = "/Users/me/Desktop"
+    world = save_panel_world("Schreibtisch \u2014 iCloud", {path: {"file": "Schreibtisch"}})
+    reply = save(world, path)
+    assert reply["ok"] is True, reply
+
+
+def test_save_panel_refuses_a_different_folder_without_saving():
+    path = "/Users/me/Library/Mobile Documents/com~apple~CloudDocs"
+    world = save_panel_world("Documents \u2014 iCloud", {path: {"url": "iCloud Drive"}})
+    reply = save(world, path)
+    assert reply["ok"] is False
+    assert reply["error"] == ("the Save panel is in folder 'Documents \u2014 iCloud', expected "
+                              "'com~apple~CloudDocs' or 'com~apple~CloudDocs' or 'iCloud Drive'")
+    assert reply["_log"]["pressed"] == []
