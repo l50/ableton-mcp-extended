@@ -276,9 +276,14 @@ function safe(f, dflt) {
   try { var v = f(); return (v === undefined || v === null) ? dflt : v; }
   catch (e) { return dflt; }
 }
+// Live marks the current menu choice with a check mark whose exact
+// characters vary (U+2714 or U+2713, maybe a variation selector, maybe a
+// space), so drop everything before the first letter or digit.
+function stripMark(s) {
+  return String(s === undefined || s === null ? '' : s).replace(/^[^\p{L}\p{N}]+/u, '');
+}
 function norm(s) {
-  return String(s === undefined || s === null ? '' : s).toLowerCase()
-    .replace(/…/g, '...').replace(/^[\u2714\u2713]/, '').replace(/[\s,]+/g, '');
+  return stripMark(s).toLowerCase().replace(/…/g, '...').replace(/[\s,]+/g, '');
 }
 function proc(cmd) {
   var ps = SE.processes.whose({bundleIdentifier: cmd.bundle});
@@ -361,7 +366,7 @@ function pickFromMenu(p, el, values, firstOnly) {
     if (matches(name, values)) {
       press(items[i]);
       delay(0.4);
-      return {seen: seen, picked: name.replace(/^[\u2714\u2713]\s*/, '')};
+      return {seen: seen, picked: stripMark(name)};
     }
     if (firstOnly) break;
   }
@@ -388,6 +393,28 @@ function textsOf(w) {
     if (v) out.push(String(v));
   }
   return out;
+}
+// Names the Save panel's Where pop-up may show for cmd.directory: the
+// on-disk name and the Finder display name, which differ for localized
+// folders and iCloud Drive.
+function folderNames(cmd) {
+  var names = [cmd.folder_name];
+  names.push(safe(function () {
+    ObjC.import('Foundation');
+    return $.NSFileManager.defaultManager.displayNameAtPath(cmd.directory).js;
+  }, ''));
+  names.push(safe(function () {
+    ObjC.import('Foundation');
+    var ref = Ref();
+    $.NSURL.fileURLWithPath(cmd.directory).getResourceValueForKeyError(ref, $.NSURLLocalizedNameKey, null);
+    return ObjC.unwrap(ref[0]);
+  }, ''));
+  return names.filter(function (n) { return n; });
+}
+// A synced Desktop or Documents folder shows as "Desktop — iCloud".
+function folderMatches(where, names) {
+  var bare = String(where).replace(/\s+[\u2014\u2013-]\s+iCloud$/, '');
+  return matches(where, names) || matches(bare, names);
 }
 function clickMenu(p, path) {
   var bar = p.menuBars[0];
@@ -510,9 +537,10 @@ function dispatch(cmd) {
       delay(0.3);
       nameField.value = cmd.filename;
       var where = safe(function () { return findControl(w, 'Where:', ['AXPopUpButton']).value(); }, '');
-      if (cmd.folder_name && where && norm(where) !== norm(cmd.folder_name))
+      if (cmd.folder_name && where && !folderMatches(where, folderNames(cmd)))
         return {ok: false, where: where,
-                error: "the Save panel is in folder '" + where + "', expected '" + cmd.folder_name + "'"};
+                error: "the Save panel is in folder '" + where + "', expected '" +
+                  folderNames(cmd).join("' or '") + "'"};
       var name = String(safe(function () { return nameField.value(); }, ''));
       if (name !== cmd.filename)
         return {ok: false, error: "the Save panel file name is '" + name + "', expected '" + cmd.filename + "'"};
