@@ -149,7 +149,7 @@ graph TB
 
 1. You issue a command in plain English to your AI assistant (e.g., "Create a new MIDI track and name it 'Bass'").
 2. The AI Assistant understands the intent and calls the appropriate tool from the MCP server.
-3. The MCP Server (server.py) receives the tool call and constructs a specific JSON command.
+3. The MCP Server (started by `MCP_Server/server.py`; the tools live in `MCP_Server/tools/`) receives the tool call and constructs a specific JSON command.
 4. The Ableton Remote Script (__init__.py), running inside Live, receives the JSON command via a socket connection.
 5. The Remote Script executes the command using the official Ableton Live API, making the change in your session instantly.
 

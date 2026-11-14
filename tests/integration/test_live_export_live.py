@@ -27,12 +27,12 @@ if os.environ.get("ABLETON_MCP_LIVE_TESTS") != "1" or os.environ.get("ABLETON_MC
 if sys.platform != "darwin":
     pytest.skip("Live export drives the macOS UI", allow_module_level=True)
 
-from MCP_Server import server  # noqa: E402
+from MCP_Server import tools  # noqa: E402
 
 
 @pytest.mark.parametrize("fmt,bit_depth", [("wav", 24), ("mp3", 24)])
 def test_export_writes_verified_file(tmp_path, fmt, bit_depth):
-    out = json.loads(server.export_audio(
+    out = json.loads(tools.export.export_audio(
         None,
         output_path=str(tmp_path / f"smoke.{fmt}"),
         format=fmt,

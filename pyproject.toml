@@ -26,7 +26,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["MCP_Server", "elevenlabs_mcp", "Ableton-MCP_hybrid-server.AbletonMCP_UDP"]
+packages = ["MCP_Server", "MCP_Server.tools", "elevenlabs_mcp", "Ableton-MCP_hybrid-server.AbletonMCP_UDP"]
 
 [project.urls]
 "Homepage" = "https://github.com/uisato/ableton-mcp-extended"
@@ -59,4 +59,18 @@ show_missing = true
 exclude_lines = [
     "pragma: no cover",
     "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
 ]
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+# Lint and format the MCP server package. live_export.py is excluded while a
+# separate branch is editing it.
+include = ["MCP_Server/**/*.py"]
+extend-exclude = ["MCP_Server/live_export.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "G"]
+# The formatter owns line length; long lines left are docstrings that are
+# also the tool descriptions MCP clients see.
+ignore = ["E501"]

@@ -14,19 +14,19 @@ sys.modules['mcp.server.fastmcp'] = _mock_fastmcp
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from MCP_Server.server import (
+from MCP_Server.tools.browser import (  # noqa: E402
     list_external_plugins,
     load_external_plugin,
-    _invalidate_external_plugin_cache,
 )
+from MCP_Server.plugin_discovery import invalidate_external_plugin_cache  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def reset_external_plugin_cache():
     """Ensure tests don't leak plugin discovery cache state."""
-    _invalidate_external_plugin_cache()
+    invalidate_external_plugin_cache()
     yield
-    _invalidate_external_plugin_cache()
+    invalidate_external_plugin_cache()
 
 
 def _browser_response_for(path, tree):
@@ -41,7 +41,7 @@ def _browser_response_for(path, tree):
 class TestListExternalPlugins:
     """Tests for list_external_plugins."""
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_lists_and_filters_plugins_by_query(self, mock_conn):
         # Plugin discovery should recurse under plugins root and include matching names.
         mock_ableton = MagicMock()
@@ -80,7 +80,7 @@ class TestListExternalPlugins:
         assert "FabFilter Pro-Q 3" in result
         assert "FabFilter Pro-C 2" not in result  # Query should narrow results
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_returns_error_when_no_plugin_root_available(self, mock_conn):
         # If plugin roots cannot be resolved, tool should return a useful error.
         mock_ableton = MagicMock()
@@ -93,7 +93,7 @@ class TestListExternalPlugins:
         result = list_external_plugins(MagicMock())
         assert "Error listing external plugins" in result
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_uses_cache_on_repeated_calls(self, mock_conn):
         # Two list calls without refresh should only trigger one discovery traversal.
         mock_ableton = MagicMock()
@@ -122,7 +122,7 @@ class TestListExternalPlugins:
         # First traversal asks only for the plugins root in this tree.
         assert mock_ableton.send_command.call_count == 1
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_refresh_cache_forces_rescan(self, mock_conn):
         # refresh_cache=True should bypass cached discovery and call browser again.
         mock_ableton = MagicMock()
@@ -148,7 +148,7 @@ class TestListExternalPlugins:
 
         assert mock_ableton.send_command.call_count == 2
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_many_plugins_respects_max_results_limit(self, mock_conn):
         # Large plugin inventories should be truncated to max_results in output.
         mock_ableton = MagicMock()
@@ -184,7 +184,7 @@ class TestListExternalPlugins:
         assert len(listing_lines) == 10
         assert "Use max_results=60" in result
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_many_plugins_are_sorted_in_listing(self, mock_conn):
         # Results should be name-sorted for stable UX on large inventories.
         mock_ableton = MagicMock()
@@ -214,7 +214,7 @@ class TestListExternalPlugins:
 class TestLoadExternalPlugin:
     """Tests for load_external_plugin."""
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_loads_best_match_and_converts_track_index(self, mock_conn):
         # Should match by name and send load_browser_item with 0-based track index.
         mock_ableton = MagicMock()
@@ -254,7 +254,7 @@ class TestLoadExternalPlugin:
         assert load_calls[0][0][1]["track_index"] == 1  # 2 -> 1
         assert load_calls[0][0][1]["item_uri"] == "uri:proq3"
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_ambiguous_match_requires_more_specific_query(self, mock_conn):
         # With equal-strength matches and no exact hit, tool should not guess.
         mock_ableton = MagicMock()
@@ -282,7 +282,7 @@ class TestLoadExternalPlugin:
         assert "Massive" in result
         assert "Massive X" in result
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_exact_match_mode_requires_strict_name(self, mock_conn):
         # exact_match=True should reject partial names that only fuzzy-match.
         mock_ableton = MagicMock()
@@ -312,7 +312,7 @@ class TestLoadExternalPlugin:
 
         assert "No external plugin matched 'massive'" in result
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_multiple_loads_reuse_discovery_cache(self, mock_conn):
         # Repeated loads should not rescan browser each time while cache is warm.
         mock_ableton = MagicMock()
@@ -350,7 +350,7 @@ class TestLoadExternalPlugin:
         assert len(discover_calls) == 1
         assert len(load_calls) == 3
 
-    @patch('MCP_Server.server.get_ableton_connection')
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_loading_different_plugins_back_to_back_without_rescan(self, mock_conn):
         # Switching plugin names between loads should still use cached discovery set.
         mock_ableton = MagicMock()
