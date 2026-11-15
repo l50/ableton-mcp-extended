@@ -29,7 +29,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node is not installed")
 # Builds the fake world, then the driver source is appended and run() is
 # called with the JSON command passed on argv.
 _PRELUDE = r"""
-var LOG = {keys: [], stray: [], pressed: [], clicked: [], typed: []};  // stray: keys sent while Live was not frontmost
+var LOG = {keys: [], stray: [], pressed: [], clicked: [], typed: [], activated: 0, relaunched: 0};  // stray: keys sent while Live was not frontmost
 var WORLD = JSON.parse(process.argv[2]);
 var CLOCK = {now: 0, g: []};  // fake seconds; g: when each Cmd+Shift+G arrived
 var SHEET = WORLD.sheet || {};  // late: seconds before the sheet shows; ignore: shortcuts swallowed
@@ -123,12 +123,15 @@ var ACTIONS = {
 // it back on activate(); front: 'never' ignores activate(). Keys sent while
 // it is not frontmost go to another app: they do nothing here and are logged
 // as stray.
-var FRONT_MODE, FRONT;
+var FRONT_MODE, FRONT, RUNNING = true;
 function setFront(mode) { FRONT_MODE = mode; FRONT = mode === 'yes'; }
 setFront(WORLD.front || 'yes');
 var FAKE_PROC = {
   windows: function () { return windows; },
-  frontmost: function () { return FRONT; },
+  frontmost: function () {
+    if (FRONT_MODE === 'quit') { RUNNING = false; FRONT = false; }
+    return FRONT;
+  },
   menuBars: [{menuBarItems: {byName: function (menu) {
     return {menus: [{menuItems: function () {
       if (!(WORLD.menus || {})[menu]) throw new Error("Can't get object.");
@@ -156,11 +159,12 @@ var $ = {
 };
 function Application(name) {
   if (name !== 'System Events') return {activate: function () {
-    LOG.activated = (LOG.activated || 0) + 1;
+    LOG.activated++;
+    if (!RUNNING) { LOG.relaunched++; RUNNING = true; }
     if (FRONT_MODE === 'lost') FRONT = true;
   }};
   return {
-    processes: {whose: function () { return [FAKE_PROC]; }},
+    processes: {whose: function () { return RUNNING ? [FAKE_PROC] : []; }},
     keyCode: function (code) {
       if (!FRONT) { LOG.stray.push(code); return; }
       LOG.keys.push(code);
@@ -453,7 +457,7 @@ def save_panel_world(where, display_names=None, sheet=None, front="yes"):
     ``sheet`` shapes the Go to Folder sheet: ``late`` seconds before it shows,
     ``ignore`` shortcuts swallowed first, ``never`` to leave it closed,
     ``no_field`` for a sheet whose path can only be typed, ``front`` for what
-    becomes of Live's front once it shows (``lost`` or ``never``), and
+    becomes of Live's front once it shows (``lost``, ``never``, or ``quit``), and
     ``closes`` seconds before the Save panel goes away or ``dismisses`` seconds
     before its sheet goes away.
     """
@@ -607,6 +611,20 @@ def test_save_panel_sends_nothing_while_live_cannot_get_the_front():
     assert reply["_log"]["keys"] == [] and reply["_log"]["stray"] == []  # no keystroke reached another app
     assert reply["_log"]["typed"] == ["song"]
     assert reply["_log"]["activated"] >= 2
+
+
+@pytest.mark.parametrize(("sheet", "front", "keys", "sent"), [
+    ({}, "quit", "Cmd+Shift+G", []),
+    ({"no_field": True, "front": "quit"}, "yes", "the folder path", ["g"]),
+    ({"front": "quit"}, "yes", "Return", ["g"]),
+])
+def test_save_panel_does_not_relaunch_live_during_focus_recovery(sheet, front, keys, sent):
+    reply = slow_save(sheet, front=front)
+    assert reply["ok"] is False
+    assert reply["error"] == f"Ableton Live is not running, so {keys} was not sent"
+    assert reply["_log"]["keys"] == sent
+    assert reply["_log"]["activated"] == 0
+    assert reply["_log"]["relaunched"] == 0
 
 
 def test_save_panel_types_the_path_into_a_sheet_that_has_no_field_to_set():

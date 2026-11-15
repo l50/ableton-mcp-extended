@@ -425,7 +425,11 @@ function folderMatches(where, names) {
 function requireFront(p, cmd, keys) {
   var front = safe(function () { return p.frontmost(); }, false);
   for (var t = 0; t < 20 && !front; t++) {
-    if (t % 5 === 0) Application(cmd.bundle).activate();
+    if (t % 5 === 0) {
+      if (SE.processes.whose({bundleIdentifier: cmd.bundle}).length === 0)
+        throw new Error('Ableton Live is not running, so ' + keys + ' was not sent');
+      Application(cmd.bundle).activate();
+    }
     delay(0.1);
     front = safe(function () { return p.frontmost(); }, false);
   }
