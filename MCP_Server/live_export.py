@@ -276,14 +276,9 @@ function safe(f, dflt) {
   try { var v = f(); return (v === undefined || v === null) ? dflt : v; }
   catch (e) { return dflt; }
 }
-// Live marks the current menu choice with a check mark whose exact
-// characters vary (U+2714 or U+2713, maybe a variation selector, maybe a
-// space), so drop everything before the first letter or digit.
-function stripMark(s) {
-  return String(s === undefined || s === null ? '' : s).replace(/^[^\p{L}\p{N}]+/u, '');
-}
 function norm(s) {
-  return stripMark(s).toLowerCase().replace(/…/g, '...').replace(/[\s,]+/g, '');
+  return String(s === undefined || s === null ? '' : s).toLowerCase()
+    .replace(/…/g, '...').replace(/[\s,]+/g, '');
 }
 function proc(cmd) {
   var ps = SE.processes.whose({bundleIdentifier: cmd.bundle});
@@ -354,6 +349,12 @@ function menuItemsOf(p) {
   }
   return items;
 }
+// Live marks the current menu choice with a check mark whose exact
+// characters vary (U+2714 or U+2713, maybe a variation selector, maybe a
+// space), so drop everything before the first letter or digit.
+function stripMark(name) {
+  return name.replace(/^[^\p{L}\p{N}]+/u, '');
+}
 function pickFromMenu(p, el, values, firstOnly) {
   press(el);
   delay(0.6);
@@ -363,10 +364,11 @@ function pickFromMenu(p, el, values, firstOnly) {
     var name = String(safe(function () { return items[i].name(); }, ''));
     if (!name) continue;
     seen.push(name);
-    if (matches(name, values)) {
+    var bare = stripMark(name);
+    if (matches(bare, values)) {
       press(items[i]);
       delay(0.4);
-      return {seen: seen, picked: stripMark(name)};
+      return {seen: seen, picked: bare};
     }
     if (firstOnly) break;
   }
@@ -409,7 +411,7 @@ function folderNames(cmd) {
     $.NSURL.fileURLWithPath(cmd.directory).getResourceValueForKeyError(ref, $.NSURLLocalizedNameKey, null);
     return ObjC.unwrap(ref[0]);
   }, ''));
-  return names.filter(function (n) { return n; });
+  return names.filter(function (n, i) { return n && names.indexOf(n) === i; });
 }
 // A synced Desktop or Documents folder shows as "Desktop — iCloud".
 function folderMatches(where, names) {

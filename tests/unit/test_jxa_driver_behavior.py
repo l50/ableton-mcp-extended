@@ -459,5 +459,18 @@ def test_save_panel_refuses_a_different_folder_without_saving():
     reply = save(world, path)
     assert reply["ok"] is False
     assert reply["error"] == ("the Save panel is in folder 'Documents \u2014 iCloud', expected "
-                              "'com~apple~CloudDocs' or 'com~apple~CloudDocs' or 'iCloud Drive'")
+                              "'com~apple~CloudDocs' or 'iCloud Drive'")
+    assert reply["_log"]["pressed"] == []
+
+
+@pytest.mark.parametrize("where, folder", [
+    ("_bounces", "bounces"), ("bounces", "_bounces"), ("\U0001f3b8", "\U0001f941"),
+])
+def test_save_panel_tells_folders_apart_by_their_leading_symbols(where, folder):
+    # Regression: the check mark tolerance meant for chooser menu items also
+    # dropped leading symbols from folder names, so these compared equal.
+    reply = save(save_panel_world(where), "/tmp/x/" + folder)
+    assert reply["ok"] is False
+    assert reply["where"] == where
+    assert reply["error"] == f"the Save panel is in folder '{where}', expected '{folder}'"
     assert reply["_log"]["pressed"] == []
