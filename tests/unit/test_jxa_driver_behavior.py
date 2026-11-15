@@ -37,6 +37,7 @@ var ignored = 0;
 function delay(s) {
   CLOCK.now += s;
   if (SHEET.closes !== undefined && CLOCK.now >= SHEET.closes - 1e-9) closePanel();
+  if (SHEET.dismisses !== undefined && CLOCK.now >= SHEET.dismisses - 1e-9) dismissSheet();
   syncSheet();
 }
 function closePanel() {
@@ -47,9 +48,13 @@ function closePanel() {
     return false;
   });
 }
+function dismissSheet() {
+  CLOCK.dismissed = true;
+  windows.forEach(function (w) { w.sheets = []; });
+}
 function syncSheet() {
   // The sheet shows SHEET.late seconds after the first shortcut that was not swallowed.
-  if (SHEET.never || CLOCK.opened === undefined || CLOCK.done) return;
+  if (SHEET.never || CLOCK.opened === undefined || CLOCK.done || CLOCK.dismissed) return;
   if (CLOCK.now - CLOCK.opened < (SHEET.late || 0) - 1e-9) return;
   windows.forEach(function (w) {
     if (w.name() !== 'Save' || w.sheets.length) return;
@@ -449,7 +454,8 @@ def save_panel_world(where, display_names=None, sheet=None, front="yes"):
     ``ignore`` shortcuts swallowed first, ``never`` to leave it closed,
     ``no_field`` for a sheet whose path can only be typed, ``front`` for what
     becomes of Live's front once it shows (``lost`` or ``never``), and
-    ``closes`` seconds before the Save panel itself goes away.
+    ``closes`` seconds before the Save panel goes away or ``dismisses`` seconds
+    before its sheet goes away.
     """
     return {"sheet": sheet or {}, "front": front, "windows": [
         {"role": "AXWindow", "subrole": "AXDialog", "name": "Save", "kids": [
@@ -585,6 +591,15 @@ def test_save_panel_reactivates_live_before_sending_when_it_lost_the_front():
     assert "/tmp/x/live-test" in reply["_log"]["typed"]
 
 
+def test_save_panel_does_not_send_shortcut_when_panel_closes_during_focus_recovery():
+    reply = slow_save({"closes": 0.05}, front="lost")
+    assert reply["ok"] is False
+    assert reply["error"] == "the Save panel was no longer open, so Cmd+Shift+G was not sent"
+    assert reply["_log"]["keys"] == []
+    assert reply["_log"]["stray"] == []
+    assert reply["_log"]["typed"] == ["song"]
+
+
 def test_save_panel_sends_nothing_while_live_cannot_get_the_front():
     reply = slow_save({}, front="never")
     assert reply["ok"] is False
@@ -610,10 +625,30 @@ def test_save_panel_does_not_type_the_path_while_live_is_not_frontmost():
     assert reply["_log"]["pressed"] == []
 
 
+def test_save_panel_does_not_type_path_when_sheet_closes_during_focus_recovery():
+    reply = slow_save({"no_field": True, "front": "lost", "dismisses": 0.15})
+    assert reply["ok"] is False
+    assert reply["error"] == (
+        "the Go to Folder sheet was no longer open, so the folder path was not sent"
+    )
+    assert reply["_log"]["keys"] == ["g"]
+    assert reply["_log"]["stray"] == []
+    assert reply["_log"]["pressed"] == []
+
+
 def test_save_panel_does_not_send_return_while_live_is_not_frontmost():
     reply = slow_save({"front": "never"})
     assert reply["ok"] is False
     assert reply["error"] == "Ableton Live was not frontmost, so Return was not sent"
+    assert reply["_log"]["keys"] == ["g"]
+    assert reply["_log"]["stray"] == []
+    assert reply["_log"]["pressed"] == []
+
+
+def test_save_panel_does_not_send_return_when_sheet_closes_during_focus_recovery():
+    reply = slow_save({"front": "lost", "dismisses": 0.45})
+    assert reply["ok"] is False
+    assert reply["error"] == "the Go to Folder sheet was no longer open, so Return was not sent"
     assert reply["_log"]["keys"] == ["g"]
     assert reply["_log"]["stray"] == []
     assert reply["_log"]["pressed"] == []

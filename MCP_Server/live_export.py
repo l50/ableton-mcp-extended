@@ -431,6 +431,10 @@ function requireFront(p, cmd, keys) {
   }
   if (!front) throw new Error('Ableton Live was not frontmost, so ' + keys + ' was not sent');
 }
+function requireKeystrokeTarget(target, targetName, keys) {
+  if (!safe(target, false))
+    throw new Error(targetName + ' was no longer open, so ' + keys + ' was not sent');
+}
 function clickMenu(p, path) {
   var bar = p.menuBars[0];
   var top = bar.menuBarItems.byName(path[0]);
@@ -531,6 +535,8 @@ function dispatch(cmd) {
         if (safe(function () { return w.name(); }, null) !== cmd.window) break;
         requireFront(p, cmd, 'Cmd+Shift+G');
         safe(function () { w.actions.byName('AXRaise').perform(); }, null);
+        requireKeystrokeTarget(function () { return w.name() === cmd.window; },
+                               'the Save panel', 'Cmd+Shift+G');
         SE.keystroke('g', {using: ['command down', 'shift down']});
         for (var t = 0; t < 50 && !sheet; t++) {
           delay(0.1);
@@ -548,10 +554,16 @@ function dispatch(cmd) {
       }
       if (!typed) {
         requireFront(p, cmd, 'the folder path');
+        requireKeystrokeTarget(function () {
+          return w.name() === cmd.window && w.sheets.length;
+        }, 'the Go to Folder sheet', 'the folder path');
         SE.keystroke(cmd.directory);
       }
       delay(0.3);
       requireFront(p, cmd, 'Return');
+      requireKeystrokeTarget(function () {
+        return w.name() === cmd.window && w.sheets.length;
+      }, 'the Go to Folder sheet', 'Return');
       SE.keyCode(36);  // Return: go
       for (var t = 0; t < 30; t++) {
         delay(0.1);
