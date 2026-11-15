@@ -426,9 +426,14 @@ function requireFront(p, cmd, keys) {
   var front = safe(function () { return p.frontmost(); }, false);
   for (var t = 0; t < 20 && !front; t++) {
     if (t % 5 === 0) {
-      if (SE.processes.whose({bundleIdentifier: cmd.bundle}).length === 0)
-        throw new Error('Ableton Live is not running, so ' + keys + ' was not sent');
-      Application(cmd.bundle).activate();
+      try { p.frontmost = true; }
+      catch (e) {
+        if (safe(function () {
+          return SE.processes.whose({bundleIdentifier: cmd.bundle}).length;
+        }, null) === 0)
+          throw new Error('Ableton Live is not running, so ' + keys + ' was not sent');
+        throw e;
+      }
     }
     delay(0.1);
     front = safe(function () { return p.frontmost(); }, false);
