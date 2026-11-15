@@ -235,7 +235,7 @@ What gets set:
 | `overwrite` | Replace an existing file | false |
 | `render_timeout` | Seconds to wait for the render to finish | 900 (`export_video`: 1800) |
 
-Rendered Track is always set to Main. `arrangement` moves the loop brace over the whole Arrangement to select it, and puts the brace back afterwards. `arrangement` and `loop` also switch Live to the Arrangement View and leave it there. Live keeps the dialog settings these tools choose for your next manual export. Options the tools don't expose (dither, Render as Loop, Convert to Mono, Create Analysis File, video encoder) are left as they are.
+Rendered Track is always set to Main. `arrangement` moves the loop brace over the whole Arrangement to select it, and puts the brace back afterwards. `arrangement` and `loop` also switch Live to the Arrangement View, give it keyboard focus, and leave it there. Live keeps the dialog settings these tools choose for your next manual export. Options the tools don't expose (dither, Render as Loop, Convert to Mono, Create Analysis File, video encoder) are left as they are.
 
 Live renders what is playing, so `arrangement` and `loop` refuse to run while Session clips override the Arrangement (the Back to Arrangement button is lit). Click it first, or use `selection` to render what you hear.
 
