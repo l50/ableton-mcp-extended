@@ -418,6 +418,19 @@ function folderMatches(where, names) {
   var bare = String(where).replace(/\s+[\u2014\u2013-]\s+iCloud$/, '');
   return matches(where, names) || matches(bare, names);
 }
+// Keystrokes go to whichever app is frontmost, and Live can lose the front
+// while the Save panel is up (a Go to Folder that never shows with Live in
+// the background), so bring Live back first and send nothing while it is
+// not frontmost.
+function requireFront(p, cmd, keys) {
+  var front = safe(function () { return p.frontmost(); }, false);
+  for (var t = 0; t < 20 && !front; t++) {
+    if (t % 5 === 0) Application(cmd.bundle).activate();
+    delay(0.1);
+    front = safe(function () { return p.frontmost(); }, false);
+  }
+  if (!front) throw new Error('Ableton Live was not frontmost, so ' + keys + ' was not sent');
+}
 function clickMenu(p, path) {
   var bar = p.menuBars[0];
   var top = bar.menuBarItems.byName(path[0]);
@@ -512,20 +525,11 @@ function dispatch(cmd) {
       nameField.value = cmd.filename;
       // Go to the folder: Cmd+Shift+G opens a path sheet on the panel. The
       // sheet can be slow, so wait up to 5 s, then re-send the shortcut once
-      // and wait up to 5 s more before giving up. Keystrokes go to whichever
-      // app is frontmost, and Live can lose the front while the panel opens
-      // (a Go to Folder that never shows with Live in the background), so
-      // bring Live back first and send nothing while it is not frontmost.
+      // and wait up to 5 s more before giving up.
       var sheet = null;
       for (var attempt = 0; attempt < 2 && !sheet; attempt++) {
         if (safe(function () { return w.name(); }, null) !== cmd.window) break;
-        var front = safe(function () { return p.frontmost(); }, false);
-        for (var t = 0; t < 20 && !front; t++) {
-          if (t % 5 === 0) Application(cmd.bundle).activate();
-          delay(0.1);
-          front = safe(function () { return p.frontmost(); }, false);
-        }
-        if (!front) continue;
+        requireFront(p, cmd, 'Cmd+Shift+G');
         safe(function () { w.actions.byName('AXRaise').perform(); }, null);
         SE.keystroke('g', {using: ['command down', 'shift down']});
         for (var t = 0; t < 50 && !sheet; t++) {
@@ -542,8 +546,12 @@ function dispatch(cmd) {
           try { parts[i].value = cmd.directory; typed = true; } catch (e) {}
         }
       }
-      if (!typed) SE.keystroke(cmd.directory);
+      if (!typed) {
+        requireFront(p, cmd, 'the folder path');
+        SE.keystroke(cmd.directory);
+      }
       delay(0.3);
+      requireFront(p, cmd, 'Return');
       SE.keyCode(36);  // Return: go
       for (var t = 0; t < 30; t++) {
         delay(0.1);

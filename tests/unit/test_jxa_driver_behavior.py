@@ -29,19 +29,33 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node is not installed")
 # Builds the fake world, then the driver source is appended and run() is
 # called with the JSON command passed on argv.
 _PRELUDE = r"""
-var LOG = {keys: [], pressed: [], clicked: [], typed: []};
+var LOG = {keys: [], stray: [], pressed: [], clicked: [], typed: []};  // stray: keys sent while Live was not frontmost
 var WORLD = JSON.parse(process.argv[2]);
 var CLOCK = {now: 0, g: []};  // fake seconds; g: when each Cmd+Shift+G arrived
 var SHEET = WORLD.sheet || {};  // late: seconds before the sheet shows; ignore: shortcuts swallowed
 var ignored = 0;
-function delay(s) { CLOCK.now += s; syncSheet(); }
+function delay(s) {
+  CLOCK.now += s;
+  if (SHEET.closes !== undefined && CLOCK.now >= SHEET.closes - 1e-9) closePanel();
+  syncSheet();
+}
+function closePanel() {
+  // The Save panel goes away; System Events throws on a closed window's reference.
+  windows = windows.filter(function (w) {
+    if (w.name() !== 'Save') return true;
+    w.name = function () { throw new Error("Can't get object."); };
+    return false;
+  });
+}
 function syncSheet() {
   // The sheet shows SHEET.late seconds after the first shortcut that was not swallowed.
   if (SHEET.never || CLOCK.opened === undefined || CLOCK.done) return;
   if (CLOCK.now - CLOCK.opened < (SHEET.late || 0) - 1e-9) return;
   windows.forEach(function (w) {
-    if (w.name() === 'Save' && !w.sheets.length) w.sheets = [mk({role: 'AXSheet', kids: [
+    if (w.name() !== 'Save' || w.sheets.length) return;
+    w.sheets = [mk({role: 'AXSheet', kids: SHEET.no_field ? [] : [
       {role: 'AXTextField', description: 'path', writable: true}]})];
+    if (SHEET.front) setFront(SHEET.front);
   });
 }
 function mk(spec) {
@@ -101,8 +115,12 @@ var ACTIONS = {
   toggle: function (sw) { sw.spec.value = sw.spec.value === 'On' ? 'Off' : 'On'; }
 };
 // Live is frontmost unless the world says it lost the front: front: 'lost' gets
-// it back on activate(); front: 'never' ignores activate().
-var FRONT = (WORLD.front || 'yes') === 'yes';
+// it back on activate(); front: 'never' ignores activate(). Keys sent while
+// it is not frontmost go to another app: they do nothing here and are logged
+// as stray.
+var FRONT_MODE, FRONT;
+function setFront(mode) { FRONT_MODE = mode; FRONT = mode === 'yes'; }
+setFront(WORLD.front || 'yes');
 var FAKE_PROC = {
   windows: function () { return windows; },
   frontmost: function () { return FRONT; },
@@ -134,11 +152,12 @@ var $ = {
 function Application(name) {
   if (name !== 'System Events') return {activate: function () {
     LOG.activated = (LOG.activated || 0) + 1;
-    if (WORLD.front === 'lost') FRONT = true;
+    if (FRONT_MODE === 'lost') FRONT = true;
   }};
   return {
     processes: {whose: function () { return [FAKE_PROC]; }},
     keyCode: function (code) {
+      if (!FRONT) { LOG.stray.push(code); return; }
       LOG.keys.push(code);
       if (code === 36) { CLOCK.done = true; windows.forEach(function (w) { w.sheets = []; }); }  // Return: go
       if (code === 53) {  // Esc: close an open menu window only
@@ -148,6 +167,7 @@ function Application(name) {
       }
     },
     keystroke: function (k, opts) {
+      if (!FRONT) { LOG.stray.push(k); return; }
       LOG.keys.push(k);
       // Cmd+Shift+G opens the Go to Folder sheet on the Save panel, once the
       // world's slow-sheet settings allow it.
@@ -426,7 +446,10 @@ def save_panel_world(where, display_names=None, sheet=None, front="yes"):
     """Live's Save panel: a writable Save As field and a read-only Where pop-up.
 
     ``sheet`` shapes the Go to Folder sheet: ``late`` seconds before it shows,
-    ``ignore`` shortcuts swallowed first, ``never`` to leave it closed.
+    ``ignore`` shortcuts swallowed first, ``never`` to leave it closed,
+    ``no_field`` for a sheet whose path can only be typed, ``front`` for what
+    becomes of Live's front once it shows (``lost`` or ``never``), and
+    ``closes`` seconds before the Save panel itself goes away.
     """
     return {"sheet": sheet or {}, "front": front, "windows": [
         {"role": "AXWindow", "subrole": "AXDialog", "name": "Save", "kids": [
@@ -542,12 +565,13 @@ def test_save_panel_gives_up_safely_when_the_sheet_never_opens():
 
 
 def test_save_panel_skips_the_resend_when_the_panel_is_gone():
-    world = save_panel_world("live-test", sheet={"never": True})
-    world["windows"][0]["name"] = "Elsewhere"  # the Save panel is not the window it was
-    reply = drive("save_panel", world, window="Elsewhere", directory="/tmp/x/live-test",
-                  filename="song", folder_name="live-test", replace=False)
+    reply = slow_save({"never": True, "closes": 2.0})  # gone during the first wait
     assert reply["ok"] is False
-    assert len(reply["_clock"]["g"]) == 2
+    assert ["Save", "AXDialog"] not in reply["_windows"]
+    assert len(reply["_clock"]["g"]) == 1
+    assert reply["_log"]["keys"] == ["g"]
+    assert reply["_log"]["pressed"] == []
+    assert reply["_log"]["typed"] == ["song"]  # only the file name, never the folder path
 
 
 def test_save_panel_reactivates_live_before_sending_when_it_lost_the_front():
@@ -557,13 +581,51 @@ def test_save_panel_reactivates_live_before_sending_when_it_lost_the_front():
     assert reply["ok"] is not False, reply
     assert reply["_log"]["activated"] >= 1
     assert len(reply["_clock"]["g"]) == 1
+    assert reply["_log"]["stray"] == []
     assert "/tmp/x/live-test" in reply["_log"]["typed"]
 
 
 def test_save_panel_sends_nothing_while_live_cannot_get_the_front():
     reply = slow_save({}, front="never")
     assert reply["ok"] is False
-    assert reply["error"] == "the Go to Folder sheet did not open in the Save panel"
-    assert reply["_log"]["keys"] == []  # no keystroke reached another app
+    assert reply["error"] == "Ableton Live was not frontmost, so Cmd+Shift+G was not sent"
+    assert reply["_log"]["keys"] == [] and reply["_log"]["stray"] == []  # no keystroke reached another app
     assert reply["_log"]["typed"] == ["song"]
     assert reply["_log"]["activated"] >= 2
+
+
+def test_save_panel_types_the_path_into_a_sheet_that_has_no_field_to_set():
+    reply = slow_save({"no_field": True})
+    assert reply["ok"] is True, reply
+    assert reply["_log"]["keys"] == ["g", "/tmp/x/live-test", 36]
+    assert reply["_log"]["pressed"] == ["Save"]
+
+
+def test_save_panel_does_not_type_the_path_while_live_is_not_frontmost():
+    reply = slow_save({"no_field": True, "front": "never"})
+    assert reply["ok"] is False
+    assert reply["error"] == "Ableton Live was not frontmost, so the folder path was not sent"
+    assert reply["_log"]["keys"] == ["g"]
+    assert reply["_log"]["stray"] == []
+    assert reply["_log"]["pressed"] == []
+
+
+def test_save_panel_does_not_send_return_while_live_is_not_frontmost():
+    reply = slow_save({"front": "never"})
+    assert reply["ok"] is False
+    assert reply["error"] == "Ableton Live was not frontmost, so Return was not sent"
+    assert reply["_log"]["keys"] == ["g"]
+    assert reply["_log"]["stray"] == []
+    assert reply["_log"]["pressed"] == []
+
+
+@pytest.mark.parametrize("no_field, keys", [
+    (True, ["g", "/tmp/x/live-test", 36]), (False, ["g", 36]),
+])
+def test_save_panel_reactivates_live_before_the_path_and_return_keystrokes(no_field, keys):
+    reply = slow_save({"no_field": no_field, "front": "lost"})
+    assert reply["ok"] is True, reply
+    assert reply["_log"]["activated"] >= 1
+    assert reply["_log"]["keys"] == keys
+    assert reply["_log"]["stray"] == []
+    assert reply["_log"]["pressed"] == ["Save"]
