@@ -444,6 +444,16 @@ function requireKeystrokeTarget(target, targetName, keys) {
   if (!safe(target, false))
     throw new Error(targetName + ' was no longer open, so ' + keys + ' was not sent');
 }
+function requireWindowFocus(w, target, targetName, keys) {
+  for (var t = 0; t < 20; t++) {
+    requireKeystrokeTarget(target, targetName, keys);
+    if (safe(function () { return w.focused(); }, false)) return;
+    delay(0.1);
+  }
+  requireKeystrokeTarget(target, targetName, keys);
+  if (safe(function () { return w.focused(); }, false)) return;
+  throw new Error(targetName + ' did not get keyboard focus, so ' + keys + ' was not sent');
+}
 function clickMenu(p, path) {
   var bar = p.menuBars[0];
   var top = bar.menuBarItems.byName(path[0]);
@@ -563,9 +573,10 @@ function dispatch(cmd) {
       }
       if (!typed) {
         requireFront(p, cmd, 'the folder path');
-        requireKeystrokeTarget(function () {
+        var pathTarget = function () {
           return w.name() === cmd.window && w.sheets.length;
-        }, 'the Go to Folder sheet', 'the folder path');
+        };
+        requireWindowFocus(w, pathTarget, 'the Go to Folder sheet', 'the folder path');
         SE.keystroke(cmd.directory);
       }
       delay(0.3);

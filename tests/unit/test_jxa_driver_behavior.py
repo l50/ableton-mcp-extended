@@ -36,6 +36,10 @@ var SHEET = WORLD.sheet || {};  // late: seconds before the sheet shows; ignore:
 var ignored = 0;
 function delay(s) {
   CLOCK.now += s;
+  if (FOCUS_READY_AT !== null && CLOCK.now >= FOCUS_READY_AT - 1e-9) {
+    KEYBOARD_FOCUS = true;
+    FOCUS_READY_AT = null;
+  }
   if (SHEET.closes !== undefined && CLOCK.now >= SHEET.closes - 1e-9) closePanel();
   if (SHEET.dismisses !== undefined && CLOCK.now >= SHEET.dismisses - 1e-9) dismissSheet();
   syncSheet();
@@ -70,6 +74,9 @@ function mk(spec) {
   o.description = function () { return spec.description || ''; };
   o.title = function () { return spec.title || ''; };
   o.name = function () { return spec.name || ''; };
+  o.focused = function () {
+    return spec.role === 'AXWindow' && spec.name === 'Save' && KEYBOARD_FOCUS;
+  };
   // Live ignores AXValue writes, so assigning el.value does nothing.
   var valueFn = function () { return spec.value; };
   // Text fields (spec.writable) do take writes.
@@ -123,8 +130,14 @@ var ACTIONS = {
 // it back on a focus request; front: 'never' ignores one. Keys sent while
 // it is not frontmost go to another app: they do nothing here and are logged
 // as stray.
-var FRONT_MODE, FRONT, RUNNING = true, PROCESS_LOOKUPS = 0;
-function setFront(mode) { FRONT_MODE = mode; FRONT = mode === 'yes'; }
+var FRONT_MODE, FRONT, KEYBOARD_FOCUS, FOCUS_READY_AT = null;
+var RUNNING = true, PROCESS_LOOKUPS = 0;
+function setFront(mode) {
+  FRONT_MODE = mode;
+  FRONT = mode === 'yes';
+  KEYBOARD_FOCUS = FRONT;
+  FOCUS_READY_AT = null;
+}
 setFront(WORLD.front || 'yes');
 var FAKE_PROC = {
   windows: function () { return windows; },
@@ -148,7 +161,11 @@ Object.defineProperty(FAKE_PROC, 'frontmost', {
     LOG.focused++;
     if (FRONT_MODE === 'quit_during_focus') RUNNING = false;
     if (!RUNNING) { LOG.stale_focus++; throw new Error("Can't get object."); }
-    if (value && FRONT_MODE !== 'never') FRONT = true;
+    if (value && FRONT_MODE !== 'never') {
+      FRONT = true;
+      if (FRONT_MODE === 'settling') FOCUS_READY_AT = CLOCK.now + 0.3;
+      else KEYBOARD_FOCUS = true;
+    }
   }
 });
 // The driver asks Foundation for a folder's Finder display name; the world
@@ -179,7 +196,7 @@ function Application(name) {
       return found;
     }},
     keyCode: function (code) {
-      if (!FRONT) { LOG.stray.push(code); return; }
+      if (!FRONT || !KEYBOARD_FOCUS) { LOG.stray.push(code); return; }
       LOG.keys.push(code);
       if (code === 36) { CLOCK.done = true; windows.forEach(function (w) { w.sheets = []; }); }  // Return: go
       if (code === 53) {  // Esc: close an open menu window only
@@ -189,7 +206,7 @@ function Application(name) {
       }
     },
     keystroke: function (k, opts) {
-      if (!FRONT) { LOG.stray.push(k); return; }
+      if (!FRONT || !KEYBOARD_FOCUS) { LOG.stray.push(k); return; }
       LOG.keys.push(k);
       // Cmd+Shift+G opens the Go to Folder sheet on the Save panel, once the
       // world's slow-sheet settings allow it.
@@ -471,7 +488,7 @@ def save_panel_world(where, display_names=None, sheet=None, front="yes"):
     ``ignore`` shortcuts swallowed first, ``never`` to leave it closed,
     ``no_field`` for a sheet whose path can only be typed, ``front`` for what
     becomes of Live's front once it shows (``lost``, ``never``, ``quit``, or
-    ``quit_during_focus``), and
+    ``quit_during_focus``, or ``settling``), and
     ``closes`` seconds before the Save panel goes away or ``dismisses`` seconds
     before its sheet goes away.
     """
@@ -665,6 +682,14 @@ def test_save_panel_does_not_type_the_path_while_live_is_not_frontmost():
     assert reply["_log"]["keys"] == ["g"]
     assert reply["_log"]["stray"] == []
     assert reply["_log"]["pressed"] == []
+
+
+def test_save_panel_waits_for_sheet_keyboard_focus_before_typing_path():
+    reply = slow_save({"no_field": True, "front": "settling"})
+    assert reply["ok"] is True, reply
+    assert reply["_log"]["keys"] == ["g", "/tmp/x/live-test", 36]
+    assert reply["_log"]["stray"] == []
+    assert reply["_log"]["pressed"] == ["Save"]
 
 
 def test_save_panel_does_not_type_path_when_sheet_closes_during_focus_recovery():
