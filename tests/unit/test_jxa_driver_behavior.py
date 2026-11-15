@@ -100,9 +100,12 @@ var ACTIONS = {
   },
   toggle: function (sw) { sw.spec.value = sw.spec.value === 'On' ? 'Off' : 'On'; }
 };
+// Live is frontmost unless the world says it lost the front: front: 'lost' gets
+// it back on activate(); front: 'never' ignores activate().
+var FRONT = (WORLD.front || 'yes') === 'yes';
 var FAKE_PROC = {
   windows: function () { return windows; },
-  frontmost: function () { return true; },
+  frontmost: function () { return FRONT; },
   menuBars: [{menuBarItems: {byName: function (menu) {
     return {menus: [{menuItems: function () {
       if (!(WORLD.menus || {})[menu]) throw new Error("Can't get object.");
@@ -129,7 +132,10 @@ var $ = {
   }}
 };
 function Application(name) {
-  if (name !== 'System Events') return {activate: function () {}};
+  if (name !== 'System Events') return {activate: function () {
+    LOG.activated = (LOG.activated || 0) + 1;
+    if (WORLD.front === 'lost') FRONT = true;
+  }};
   return {
     processes: {whose: function () { return [FAKE_PROC]; }},
     keyCode: function (code) {
@@ -416,13 +422,13 @@ def test_set_choice_matches_a_checked_entry_that_is_not_first(mark):
     assert reply["after"] == "44100"
 
 
-def save_panel_world(where, display_names=None, sheet=None):
+def save_panel_world(where, display_names=None, sheet=None, front="yes"):
     """Live's Save panel: a writable Save As field and a read-only Where pop-up.
 
     ``sheet`` shapes the Go to Folder sheet: ``late`` seconds before it shows,
     ``ignore`` shortcuts swallowed first, ``never`` to leave it closed.
     """
-    return {"sheet": sheet or {}, "windows": [
+    return {"sheet": sheet or {}, "front": front, "windows": [
         {"role": "AXWindow", "subrole": "AXDialog", "name": "Save", "kids": [
             {"role": "AXTextField", "description": "Save As:", "value": "", "writable": True},
             {"role": "AXPopUpButton", "description": "Where:", "value": where},
@@ -494,8 +500,8 @@ def test_save_panel_tells_folders_apart_by_their_leading_symbols(where, folder):
     assert reply["_log"]["pressed"] == []
 
 
-def slow_save(sheet, directory="/tmp/x/live-test"):
-    return save(save_panel_world("live-test", sheet=sheet), directory)
+def slow_save(sheet, directory="/tmp/x/live-test", front="yes"):
+    return save(save_panel_world("live-test", sheet=sheet, front=front), directory)
 
 
 def test_save_panel_fast_sheet_sends_one_shortcut_and_does_not_wait():
@@ -542,3 +548,22 @@ def test_save_panel_skips_the_resend_when_the_panel_is_gone():
                   filename="song", folder_name="live-test", replace=False)
     assert reply["ok"] is False
     assert len(reply["_clock"]["g"]) == 2
+
+
+def test_save_panel_reactivates_live_before_sending_when_it_lost_the_front():
+    # Observed on Live 12.4.16: the Save panel was open but Live was no longer
+    # frontmost, so Cmd+Shift+G went to another app and no sheet ever opened.
+    reply = slow_save({}, front="lost")
+    assert reply["ok"] is not False, reply
+    assert reply["_log"]["activated"] >= 1
+    assert len(reply["_clock"]["g"]) == 1
+    assert "/tmp/x/live-test" in reply["_log"]["typed"]
+
+
+def test_save_panel_sends_nothing_while_live_cannot_get_the_front():
+    reply = slow_save({}, front="never")
+    assert reply["ok"] is False
+    assert reply["error"] == "the Go to Folder sheet did not open in the Save panel"
+    assert reply["_log"]["keys"] == []  # no keystroke reached another app
+    assert reply["_log"]["typed"] == ["song"]
+    assert reply["_log"]["activated"] >= 2

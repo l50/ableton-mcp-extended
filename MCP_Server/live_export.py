@@ -512,16 +512,21 @@ function dispatch(cmd) {
       nameField.value = cmd.filename;
       // Go to the folder: Cmd+Shift+G opens a path sheet on the panel. The
       // sheet can be slow, so wait up to 5 s, then re-send the shortcut once
-      // to the focused Save panel and wait up to 5 s more before giving up.
+      // and wait up to 5 s more before giving up. Keystrokes go to whichever
+      // app is frontmost, and Live can lose the front while the panel opens
+      // (a Go to Folder that never shows with Live in the background), so
+      // bring Live back first and send nothing while it is not frontmost.
       var sheet = null;
       for (var attempt = 0; attempt < 2 && !sheet; attempt++) {
-        if (attempt > 0) {
-          // Only re-send while the panel is still there: the keystroke goes
-          // to whatever is frontmost, never into another window.
-          if (safe(function () { return w.name(); }, null) !== cmd.window)
-            break;
-          safe(function () { w.actions.byName('AXRaise').perform(); }, null);
+        if (safe(function () { return w.name(); }, null) !== cmd.window) break;
+        var front = safe(function () { return p.frontmost(); }, false);
+        for (var t = 0; t < 20 && !front; t++) {
+          if (t % 5 === 0) Application(cmd.bundle).activate();
+          delay(0.1);
+          front = safe(function () { return p.frontmost(); }, false);
         }
+        if (!front) continue;
+        safe(function () { w.actions.byName('AXRaise').perform(); }, null);
         SE.keystroke('g', {using: ['command down', 'shift down']});
         for (var t = 0; t < 50 && !sheet; t++) {
           delay(0.1);
