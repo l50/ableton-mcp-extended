@@ -418,6 +418,42 @@ function folderMatches(where, names) {
   var bare = String(where).replace(/\s+[\u2014\u2013-]\s+iCloud$/, '');
   return matches(where, names) || matches(bare, names);
 }
+// Keystrokes go to whichever app is frontmost, and Live can lose the front
+// while the Save panel is up (a Go to Folder that never shows with Live in
+// the background), so bring Live back first and send nothing while it is
+// not frontmost.
+function requireFront(p, cmd, keys) {
+  var front = safe(function () { return p.frontmost(); }, false);
+  for (var t = 0; t < 20 && !front; t++) {
+    if (t % 5 === 0) {
+      try { p.frontmost = true; }
+      catch (e) {
+        if (safe(function () {
+          return SE.processes.whose({bundleIdentifier: cmd.bundle}).length;
+        }, null) === 0)
+          throw new Error('Ableton Live is not running, so ' + keys + ' was not sent');
+        throw e;
+      }
+    }
+    delay(0.1);
+    front = safe(function () { return p.frontmost(); }, false);
+  }
+  if (!front) throw new Error('Ableton Live was not frontmost, so ' + keys + ' was not sent');
+}
+function requireKeystrokeTarget(target, targetName, keys) {
+  if (!safe(target, false))
+    throw new Error(targetName + ' was no longer open, so ' + keys + ' was not sent');
+}
+function requireWindowFocus(w, target, targetName, keys) {
+  for (var t = 0; t < 20; t++) {
+    requireKeystrokeTarget(target, targetName, keys);
+    if (safe(function () { return w.focused(); }, false)) return;
+    delay(0.1);
+  }
+  requireKeystrokeTarget(target, targetName, keys);
+  if (safe(function () { return w.focused(); }, false)) return;
+  throw new Error(targetName + ' did not get keyboard focus, so ' + keys + ' was not sent');
+}
 function clickMenu(p, path) {
   var bar = p.menuBars[0];
   var top = bar.menuBarItems.byName(path[0]);
@@ -510,12 +546,21 @@ function dispatch(cmd) {
       var w = findWindow(p, cmd.window);
       var nameField = findControl(w, 'Save As:', ['AXTextField']);
       nameField.value = cmd.filename;
-      // Go to the folder: Cmd+Shift+G opens a path sheet on the panel.
-      SE.keystroke('g', {using: ['command down', 'shift down']});
+      // Go to the folder: Cmd+Shift+G opens a path sheet on the panel. The
+      // sheet can be slow, so wait up to 5 s, then re-send the shortcut once
+      // and wait up to 5 s more before giving up.
       var sheet = null;
-      for (var t = 0; t < 30 && !sheet; t++) {
-        delay(0.1);
-        sheet = safe(function () { return w.sheets.length ? w.sheets[0] : null; }, null);
+      for (var attempt = 0; attempt < 2 && !sheet; attempt++) {
+        if (safe(function () { return w.name(); }, null) !== cmd.window) break;
+        requireFront(p, cmd, 'Cmd+Shift+G');
+        safe(function () { w.actions.byName('AXRaise').perform(); }, null);
+        requireKeystrokeTarget(function () { return w.name() === cmd.window; },
+                               'the Save panel', 'Cmd+Shift+G');
+        SE.keystroke('g', {using: ['command down', 'shift down']});
+        for (var t = 0; t < 50 && !sheet; t++) {
+          delay(0.1);
+          sheet = safe(function () { return w.sheets.length ? w.sheets[0] : null; }, null);
+        }
       }
       if (!sheet) return {ok: false, error: 'the Go to Folder sheet did not open in the Save panel'};
       var typed = false;
@@ -526,8 +571,19 @@ function dispatch(cmd) {
           try { parts[i].value = cmd.directory; typed = true; } catch (e) {}
         }
       }
-      if (!typed) SE.keystroke(cmd.directory);
+      if (!typed) {
+        requireFront(p, cmd, 'the folder path');
+        var pathTarget = function () {
+          return w.name() === cmd.window && w.sheets.length;
+        };
+        requireWindowFocus(w, pathTarget, 'the Go to Folder sheet', 'the folder path');
+        SE.keystroke(cmd.directory);
+      }
       delay(0.3);
+      requireFront(p, cmd, 'Return');
+      requireKeystrokeTarget(function () {
+        return w.name() === cmd.window && w.sheets.length;
+      }, 'the Go to Folder sheet', 'Return');
       SE.keyCode(36);  // Return: go
       for (var t = 0; t < 30; t++) {
         delay(0.1);

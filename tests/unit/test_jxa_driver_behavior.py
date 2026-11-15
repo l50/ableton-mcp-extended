@@ -29,9 +29,44 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node is not installed")
 # Builds the fake world, then the driver source is appended and run() is
 # called with the JSON command passed on argv.
 _PRELUDE = r"""
-var LOG = {keys: [], pressed: [], clicked: []};
+var LOG = {keys: [], stray: [], pressed: [], clicked: [], typed: [], activated: 0, relaunched: 0, focused: 0, stale_focus: 0};  // stray: keys sent while Live was not frontmost
 var WORLD = JSON.parse(process.argv[2]);
-function delay() {}
+var CLOCK = {now: 0, g: []};  // fake seconds; g: when each Cmd+Shift+G arrived
+var SHEET = WORLD.sheet || {};  // late: seconds before the sheet shows; ignore: shortcuts swallowed
+var ignored = 0;
+function delay(s) {
+  CLOCK.now += s;
+  if (FOCUS_READY_AT !== null && CLOCK.now >= FOCUS_READY_AT - 1e-9) {
+    KEYBOARD_FOCUS = true;
+    FOCUS_READY_AT = null;
+  }
+  if (SHEET.closes !== undefined && CLOCK.now >= SHEET.closes - 1e-9) closePanel();
+  if (SHEET.dismisses !== undefined && CLOCK.now >= SHEET.dismisses - 1e-9) dismissSheet();
+  syncSheet();
+}
+function closePanel() {
+  // The Save panel goes away; System Events throws on a closed window's reference.
+  windows = windows.filter(function (w) {
+    if (w.name() !== 'Save') return true;
+    w.name = function () { throw new Error("Can't get object."); };
+    return false;
+  });
+}
+function dismissSheet() {
+  CLOCK.dismissed = true;
+  windows.forEach(function (w) { w.sheets = []; });
+}
+function syncSheet() {
+  // The sheet shows SHEET.late seconds after the first shortcut that was not swallowed.
+  if (SHEET.never || CLOCK.opened === undefined || CLOCK.done || CLOCK.dismissed) return;
+  if (CLOCK.now - CLOCK.opened < (SHEET.late || 0) - 1e-9) return;
+  windows.forEach(function (w) {
+    if (w.name() !== 'Save' || w.sheets.length) return;
+    w.sheets = [mk({role: 'AXSheet', kids: SHEET.no_field ? [] : [
+      {role: 'AXTextField', description: 'path', writable: true}]})];
+    if (SHEET.front) setFront(SHEET.front);
+  });
+}
 function mk(spec) {
   var o = {spec: spec};
   o.role = function () { return spec.role; };
@@ -39,11 +74,14 @@ function mk(spec) {
   o.description = function () { return spec.description || ''; };
   o.title = function () { return spec.title || ''; };
   o.name = function () { return spec.name || ''; };
+  o.focused = function () {
+    return spec.role === 'AXWindow' && spec.name === 'Save' && KEYBOARD_FOCUS;
+  };
   // Live ignores AXValue writes, so assigning el.value does nothing.
   var valueFn = function () { return spec.value; };
   // Text fields (spec.writable) do take writes.
   Object.defineProperty(o, 'value', {get: function () { return valueFn; },
-    set: function (v) { if (spec.writable) spec.value = v; }});
+    set: function (v) { if (spec.writable) { spec.value = v; LOG.typed.push(v); } }});
   o.enabled = function () { return spec.enabled !== false; };
   o.sheets = [];
   o.attributes = {byName: function () { return {value: function () { return !!spec.modal; }}; }};
@@ -88,9 +126,21 @@ var ACTIONS = {
   },
   toggle: function (sw) { sw.spec.value = sw.spec.value === 'On' ? 'Off' : 'On'; }
 };
+// Live is frontmost unless the world says it lost the front: front: 'lost' gets
+// it back on a focus request; front: 'never' ignores one. Keys sent while
+// it is not frontmost go to another app: they do nothing here and are logged
+// as stray.
+var FRONT_MODE, FRONT, KEYBOARD_FOCUS, FOCUS_READY_AT = null;
+var RUNNING = true, PROCESS_LOOKUPS = 0;
+function setFront(mode) {
+  FRONT_MODE = mode;
+  FRONT = mode === 'yes';
+  KEYBOARD_FOCUS = FRONT;
+  FOCUS_READY_AT = null;
+}
+setFront(WORLD.front || 'yes');
 var FAKE_PROC = {
   windows: function () { return windows; },
-  frontmost: function () { return true; },
   menuBars: [{menuBarItems: {byName: function (menu) {
     return {menus: [{menuItems: function () {
       if (!(WORLD.menus || {})[menu]) throw new Error("Can't get object.");
@@ -102,6 +152,22 @@ var FAKE_PROC = {
     }}]};
   }}}]
 };
+Object.defineProperty(FAKE_PROC, 'frontmost', {
+  get: function () { return function () {
+    if (FRONT_MODE === 'quit') { RUNNING = false; FRONT = false; }
+    return FRONT;
+  }; },
+  set: function (value) {
+    LOG.focused++;
+    if (FRONT_MODE === 'quit_during_focus') RUNNING = false;
+    if (!RUNNING) { LOG.stale_focus++; throw new Error("Can't get object."); }
+    if (value && FRONT_MODE !== 'never') {
+      FRONT = true;
+      if (FRONT_MODE === 'settling') FOCUS_READY_AT = CLOCK.now + 0.3;
+      else KEYBOARD_FOCUS = true;
+    }
+  }
+});
 // The driver asks Foundation for a folder's Finder display name; the world
 // gives them per path as {file: displayNameAtPath, url: NSURLLocalizedNameKey}.
 var DISPLAY = WORLD.display_names || {};
@@ -117,12 +183,22 @@ var $ = {
   }}
 };
 function Application(name) {
-  if (name !== 'System Events') return {activate: function () {}};
+  if (name !== 'System Events') return {activate: function () {
+    LOG.activated++;
+    if (!RUNNING) { LOG.relaunched++; RUNNING = true; }
+    if (FRONT_MODE === 'lost') FRONT = true;
+  }};
   return {
-    processes: {whose: function () { return [FAKE_PROC]; }},
+    processes: {whose: function () {
+      PROCESS_LOOKUPS++;
+      var found = RUNNING ? [FAKE_PROC] : [];
+      if (FRONT_MODE === 'quit_during_focus' && PROCESS_LOOKUPS > 1 && found.length) RUNNING = false;
+      return found;
+    }},
     keyCode: function (code) {
+      if (!FRONT || !KEYBOARD_FOCUS) { LOG.stray.push(code); return; }
       LOG.keys.push(code);
-      if (code === 36) windows.forEach(function (w) { w.sheets = []; });  // Return: go
+      if (code === 36) { CLOCK.done = true; windows.forEach(function (w) { w.sheets = []; }); }  // Return: go
       if (code === 53) {  // Esc: close an open menu window only
         windows = windows.filter(function (w) {
           return !w.entireContents().some(function (c) { return c.role() === 'AXMenuItem'; });
@@ -130,13 +206,15 @@ function Application(name) {
       }
     },
     keystroke: function (k, opts) {
+      if (!FRONT || !KEYBOARD_FOCUS) { LOG.stray.push(k); return; }
       LOG.keys.push(k);
-      // Cmd+Shift+G opens the Go to Folder sheet on the Save panel.
+      // Cmd+Shift+G opens the Go to Folder sheet on the Save panel, once the
+      // world's slow-sheet settings allow it.
       if (k === 'g' && opts && (opts.using || []).indexOf('command down') >= 0) {
-        windows.forEach(function (w) {
-          if (w.name() === 'Save') w.sheets = [mk({role: 'AXSheet', kids: [
-            {role: 'AXTextField', description: 'path', writable: true}]})];
-        });
+        CLOCK.g.push(CLOCK.now);
+        if (ignored < (SHEET.ignore || 0)) { ignored++; return; }
+        if (CLOCK.opened === undefined) CLOCK.opened = CLOCK.now;
+        syncSheet();
       }
     },
     click: function (el) { el.actions.byName('AXPress').perform(); }
@@ -147,6 +225,7 @@ function Application(name) {
 _EPILOGUE = r"""
 var reply = JSON.parse(run([process.argv[1]]));
 reply._log = LOG;
+reply._clock = CLOCK;
 reply._windows = windows.map(function (w) { return [w.name(), w.subrole()]; });
 reply._values = {};
 reply._selected = {};
@@ -402,9 +481,18 @@ def test_set_choice_matches_a_checked_entry_that_is_not_first(mark):
     assert reply["after"] == "44100"
 
 
-def save_panel_world(where, display_names=None):
-    """Live's Save panel: a writable Save As field and a read-only Where pop-up."""
-    return {"windows": [
+def save_panel_world(where, display_names=None, sheet=None, front="yes"):
+    """Live's Save panel: a writable Save As field and a read-only Where pop-up.
+
+    ``sheet`` shapes the Go to Folder sheet: ``late`` seconds before it shows,
+    ``ignore`` shortcuts swallowed first, ``never`` to leave it closed,
+    ``no_field`` for a sheet whose path can only be typed, ``front`` for what
+    becomes of Live's front once it shows (``lost``, ``never``, ``quit``, or
+    ``quit_during_focus``, or ``settling``), and
+    ``closes`` seconds before the Save panel goes away or ``dismisses`` seconds
+    before its sheet goes away.
+    """
+    return {"sheet": sheet or {}, "front": front, "windows": [
         {"role": "AXWindow", "subrole": "AXDialog", "name": "Save", "kids": [
             {"role": "AXTextField", "description": "Save As:", "value": "", "writable": True},
             {"role": "AXPopUpButton", "description": "Where:", "value": where},
@@ -474,3 +562,173 @@ def test_save_panel_tells_folders_apart_by_their_leading_symbols(where, folder):
     assert reply["where"] == where
     assert reply["error"] == f"the Save panel is in folder '{where}', expected '{folder}'"
     assert reply["_log"]["pressed"] == []
+
+
+def slow_save(sheet, directory="/tmp/x/live-test", front="yes"):
+    return save(save_panel_world("live-test", sheet=sheet, front=front), directory)
+
+
+def test_save_panel_fast_sheet_sends_one_shortcut_and_does_not_wait():
+    reply = slow_save({})
+    assert reply["ok"] is not False, reply
+    assert len(reply["_clock"]["g"]) == 1
+    assert reply["_clock"]["g"][0] == 0
+    assert reply["_clock"]["now"] < 3.5  # the Replace check alone is 2 s; no slow-path wait on top
+
+
+def test_save_panel_waits_for_a_sheet_that_opens_late_without_resending():
+    # 4 s is past the old 3 s limit but inside the first 5 s wait.
+    reply = slow_save({"late": 4.0})
+    assert reply["ok"] is not False, reply
+    assert len(reply["_clock"]["g"]) == 1
+    assert reply["where"] == "live-test"
+    assert "/tmp/x/live-test" in reply["_log"]["typed"]
+
+
+def test_save_panel_resends_the_shortcut_once_when_the_first_is_swallowed():
+    reply = slow_save({"ignore": 1})
+    assert reply["ok"] is not False, reply
+    g = reply["_clock"]["g"]
+    assert len(g) == 2 and 4.9 < g[1] - g[0] < 5.2
+    assert "/tmp/x/live-test" in reply["_log"]["typed"]
+
+
+def test_save_panel_gives_up_safely_when_the_sheet_never_opens():
+    reply = slow_save({"never": True})
+    assert reply["ok"] is False
+    assert reply["error"] == "the Go to Folder sheet did not open in the Save panel"
+    assert len(reply["_clock"]["g"]) == 2  # one re-send, no more
+    assert 9.5 < reply["_clock"]["now"] <= 10.5  # bounded at about 10 s
+    # nothing typed anywhere and nothing pressed: no Return, no Save
+    assert reply["_log"]["keys"] == ["g", "g"]
+    assert reply["_log"]["pressed"] == []
+    assert reply["_log"]["typed"] == ["song"]  # only the file name, never the folder path
+
+
+def test_save_panel_skips_the_resend_when_the_panel_is_gone():
+    reply = slow_save({"never": True, "closes": 2.0})  # gone during the first wait
+    assert reply["ok"] is False
+    assert ["Save", "AXDialog"] not in reply["_windows"]
+    assert len(reply["_clock"]["g"]) == 1
+    assert reply["_log"]["keys"] == ["g"]
+    assert reply["_log"]["pressed"] == []
+    assert reply["_log"]["typed"] == ["song"]  # only the file name, never the folder path
+
+
+def test_save_panel_reactivates_live_before_sending_when_it_lost_the_front():
+    # Observed on Live 12.4.16: the Save panel was open but Live was no longer
+    # frontmost, so Cmd+Shift+G went to another app and no sheet ever opened.
+    reply = slow_save({}, front="lost")
+    assert reply["ok"] is not False, reply
+    assert reply["_log"]["focused"] >= 1
+    assert reply["_log"]["activated"] == 0
+    assert len(reply["_clock"]["g"]) == 1
+    assert reply["_log"]["stray"] == []
+    assert "/tmp/x/live-test" in reply["_log"]["typed"]
+
+
+def test_save_panel_does_not_send_shortcut_when_panel_closes_during_focus_recovery():
+    reply = slow_save({"closes": 0.05}, front="lost")
+    assert reply["ok"] is False
+    assert reply["error"] == "the Save panel was no longer open, so Cmd+Shift+G was not sent"
+    assert reply["_log"]["keys"] == []
+    assert reply["_log"]["stray"] == []
+    assert reply["_log"]["typed"] == ["song"]
+
+
+def test_save_panel_sends_nothing_while_live_cannot_get_the_front():
+    reply = slow_save({}, front="never")
+    assert reply["ok"] is False
+    assert reply["error"] == "Ableton Live was not frontmost, so Cmd+Shift+G was not sent"
+    assert reply["_log"]["keys"] == [] and reply["_log"]["stray"] == []  # no keystroke reached another app
+    assert reply["_log"]["typed"] == ["song"]
+    assert reply["_log"]["focused"] >= 2
+    assert reply["_log"]["activated"] == 0
+
+
+@pytest.mark.parametrize(("sheet", "front", "keys", "sent"), [
+    ({}, "quit", "Cmd+Shift+G", []),
+    ({"no_field": True, "front": "quit"}, "yes", "the folder path", ["g"]),
+    ({"front": "quit"}, "yes", "Return", ["g"]),
+])
+@pytest.mark.parametrize("quit_mode", ["quit", "quit_during_focus"])
+def test_save_panel_does_not_relaunch_live_during_focus_recovery(
+    sheet, front, keys, sent, quit_mode,
+):
+    if front == "quit":
+        front = quit_mode
+    else:
+        sheet = dict(sheet, front=quit_mode)
+    reply = slow_save(sheet, front=front)
+    assert reply["ok"] is False
+    assert reply["error"] == f"Ableton Live is not running, so {keys} was not sent"
+    assert reply["_log"]["keys"] == sent
+    assert reply["_log"]["activated"] == 0
+    assert reply["_log"]["relaunched"] == 0
+    assert reply["_log"]["stale_focus"] == 1
+
+
+def test_save_panel_types_the_path_into_a_sheet_that_has_no_field_to_set():
+    reply = slow_save({"no_field": True})
+    assert reply["ok"] is True, reply
+    assert reply["_log"]["keys"] == ["g", "/tmp/x/live-test", 36]
+    assert reply["_log"]["pressed"] == ["Save"]
+
+
+def test_save_panel_does_not_type_the_path_while_live_is_not_frontmost():
+    reply = slow_save({"no_field": True, "front": "never"})
+    assert reply["ok"] is False
+    assert reply["error"] == "Ableton Live was not frontmost, so the folder path was not sent"
+    assert reply["_log"]["keys"] == ["g"]
+    assert reply["_log"]["stray"] == []
+    assert reply["_log"]["pressed"] == []
+
+
+def test_save_panel_waits_for_sheet_keyboard_focus_before_typing_path():
+    reply = slow_save({"no_field": True, "front": "settling"})
+    assert reply["ok"] is True, reply
+    assert reply["_log"]["keys"] == ["g", "/tmp/x/live-test", 36]
+    assert reply["_log"]["stray"] == []
+    assert reply["_log"]["pressed"] == ["Save"]
+
+
+def test_save_panel_does_not_type_path_when_sheet_closes_during_focus_recovery():
+    reply = slow_save({"no_field": True, "front": "lost", "dismisses": 0.15})
+    assert reply["ok"] is False
+    assert reply["error"] == (
+        "the Go to Folder sheet was no longer open, so the folder path was not sent"
+    )
+    assert reply["_log"]["keys"] == ["g"]
+    assert reply["_log"]["stray"] == []
+    assert reply["_log"]["pressed"] == []
+
+
+def test_save_panel_does_not_send_return_while_live_is_not_frontmost():
+    reply = slow_save({"front": "never"})
+    assert reply["ok"] is False
+    assert reply["error"] == "Ableton Live was not frontmost, so Return was not sent"
+    assert reply["_log"]["keys"] == ["g"]
+    assert reply["_log"]["stray"] == []
+    assert reply["_log"]["pressed"] == []
+
+
+def test_save_panel_does_not_send_return_when_sheet_closes_during_focus_recovery():
+    reply = slow_save({"front": "lost", "dismisses": 0.45})
+    assert reply["ok"] is False
+    assert reply["error"] == "the Go to Folder sheet was no longer open, so Return was not sent"
+    assert reply["_log"]["keys"] == ["g"]
+    assert reply["_log"]["stray"] == []
+    assert reply["_log"]["pressed"] == []
+
+
+@pytest.mark.parametrize("no_field, keys", [
+    (True, ["g", "/tmp/x/live-test", 36]), (False, ["g", 36]),
+])
+def test_save_panel_reactivates_live_before_the_path_and_return_keystrokes(no_field, keys):
+    reply = slow_save({"no_field": no_field, "front": "lost"})
+    assert reply["ok"] is True, reply
+    assert reply["_log"]["focused"] >= 1
+    assert reply["_log"]["activated"] == 0
+    assert reply["_log"]["keys"] == keys
+    assert reply["_log"]["stray"] == []
+    assert reply["_log"]["pressed"] == ["Save"]
