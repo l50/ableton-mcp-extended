@@ -29,9 +29,21 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node is not installed")
 # Builds the fake world, then the driver source is appended and run() is
 # called with the JSON command passed on argv.
 _PRELUDE = r"""
-var LOG = {keys: [], pressed: [], clicked: []};
+var LOG = {keys: [], pressed: [], clicked: [], typed: []};
 var WORLD = JSON.parse(process.argv[2]);
-function delay() {}
+var CLOCK = {now: 0, g: []};  // fake seconds; g: when each Cmd+Shift+G arrived
+var SHEET = WORLD.sheet || {};  // late: seconds before the sheet shows; ignore: shortcuts swallowed
+var ignored = 0;
+function delay(s) { CLOCK.now += s; syncSheet(); }
+function syncSheet() {
+  // The sheet shows SHEET.late seconds after the first shortcut that was not swallowed.
+  if (SHEET.never || CLOCK.opened === undefined || CLOCK.done) return;
+  if (CLOCK.now - CLOCK.opened < (SHEET.late || 0) - 1e-9) return;
+  windows.forEach(function (w) {
+    if (w.name() === 'Save' && !w.sheets.length) w.sheets = [mk({role: 'AXSheet', kids: [
+      {role: 'AXTextField', description: 'path', writable: true}]})];
+  });
+}
 function mk(spec) {
   var o = {spec: spec};
   o.role = function () { return spec.role; };
@@ -43,7 +55,7 @@ function mk(spec) {
   var valueFn = function () { return spec.value; };
   // Text fields (spec.writable) do take writes.
   Object.defineProperty(o, 'value', {get: function () { return valueFn; },
-    set: function (v) { if (spec.writable) spec.value = v; }});
+    set: function (v) { if (spec.writable) { spec.value = v; LOG.typed.push(v); } }});
   o.enabled = function () { return spec.enabled !== false; };
   o.sheets = [];
   o.attributes = {byName: function () { return {value: function () { return !!spec.modal; }}; }};
@@ -122,7 +134,7 @@ function Application(name) {
     processes: {whose: function () { return [FAKE_PROC]; }},
     keyCode: function (code) {
       LOG.keys.push(code);
-      if (code === 36) windows.forEach(function (w) { w.sheets = []; });  // Return: go
+      if (code === 36) { CLOCK.done = true; windows.forEach(function (w) { w.sheets = []; }); }  // Return: go
       if (code === 53) {  // Esc: close an open menu window only
         windows = windows.filter(function (w) {
           return !w.entireContents().some(function (c) { return c.role() === 'AXMenuItem'; });
@@ -131,12 +143,13 @@ function Application(name) {
     },
     keystroke: function (k, opts) {
       LOG.keys.push(k);
-      // Cmd+Shift+G opens the Go to Folder sheet on the Save panel.
+      // Cmd+Shift+G opens the Go to Folder sheet on the Save panel, once the
+      // world's slow-sheet settings allow it.
       if (k === 'g' && opts && (opts.using || []).indexOf('command down') >= 0) {
-        windows.forEach(function (w) {
-          if (w.name() === 'Save') w.sheets = [mk({role: 'AXSheet', kids: [
-            {role: 'AXTextField', description: 'path', writable: true}]})];
-        });
+        CLOCK.g.push(CLOCK.now);
+        if (ignored < (SHEET.ignore || 0)) { ignored++; return; }
+        if (CLOCK.opened === undefined) CLOCK.opened = CLOCK.now;
+        syncSheet();
       }
     },
     click: function (el) { el.actions.byName('AXPress').perform(); }
@@ -147,6 +160,7 @@ function Application(name) {
 _EPILOGUE = r"""
 var reply = JSON.parse(run([process.argv[1]]));
 reply._log = LOG;
+reply._clock = CLOCK;
 reply._windows = windows.map(function (w) { return [w.name(), w.subrole()]; });
 reply._values = {};
 reply._selected = {};
@@ -402,9 +416,13 @@ def test_set_choice_matches_a_checked_entry_that_is_not_first(mark):
     assert reply["after"] == "44100"
 
 
-def save_panel_world(where, display_names=None):
-    """Live's Save panel: a writable Save As field and a read-only Where pop-up."""
-    return {"windows": [
+def save_panel_world(where, display_names=None, sheet=None):
+    """Live's Save panel: a writable Save As field and a read-only Where pop-up.
+
+    ``sheet`` shapes the Go to Folder sheet: ``late`` seconds before it shows,
+    ``ignore`` shortcuts swallowed first, ``never`` to leave it closed.
+    """
+    return {"sheet": sheet or {}, "windows": [
         {"role": "AXWindow", "subrole": "AXDialog", "name": "Save", "kids": [
             {"role": "AXTextField", "description": "Save As:", "value": "", "writable": True},
             {"role": "AXPopUpButton", "description": "Where:", "value": where},
@@ -474,3 +492,53 @@ def test_save_panel_tells_folders_apart_by_their_leading_symbols(where, folder):
     assert reply["where"] == where
     assert reply["error"] == f"the Save panel is in folder '{where}', expected '{folder}'"
     assert reply["_log"]["pressed"] == []
+
+
+def slow_save(sheet, directory="/tmp/x/live-test"):
+    return save(save_panel_world("live-test", sheet=sheet), directory)
+
+
+def test_save_panel_fast_sheet_sends_one_shortcut_and_does_not_wait():
+    reply = slow_save({})
+    assert reply["ok"] is not False, reply
+    assert len(reply["_clock"]["g"]) == 1
+    assert reply["_clock"]["g"][0] == 0
+    assert reply["_clock"]["now"] < 3.5  # the Replace check alone is 2 s; no slow-path wait on top
+
+
+def test_save_panel_waits_for_a_sheet_that_opens_late_without_resending():
+    # 4 s is past the old 3 s limit but inside the first 5 s wait.
+    reply = slow_save({"late": 4.0})
+    assert reply["ok"] is not False, reply
+    assert len(reply["_clock"]["g"]) == 1
+    assert reply["where"] == "live-test"
+    assert "/tmp/x/live-test" in reply["_log"]["typed"]
+
+
+def test_save_panel_resends_the_shortcut_once_when_the_first_is_swallowed():
+    reply = slow_save({"ignore": 1})
+    assert reply["ok"] is not False, reply
+    g = reply["_clock"]["g"]
+    assert len(g) == 2 and 4.9 < g[1] - g[0] < 5.2
+    assert "/tmp/x/live-test" in reply["_log"]["typed"]
+
+
+def test_save_panel_gives_up_safely_when_the_sheet_never_opens():
+    reply = slow_save({"never": True})
+    assert reply["ok"] is False
+    assert reply["error"] == "the Go to Folder sheet did not open in the Save panel"
+    assert len(reply["_clock"]["g"]) == 2  # one re-send, no more
+    assert 9.5 < reply["_clock"]["now"] <= 10.5  # bounded at about 10 s
+    # nothing typed anywhere and nothing pressed: no Return, no Save
+    assert reply["_log"]["keys"] == ["g", "g"]
+    assert reply["_log"]["pressed"] == []
+    assert reply["_log"]["typed"] == ["song"]  # only the file name, never the folder path
+
+
+def test_save_panel_skips_the_resend_when_the_panel_is_gone():
+    world = save_panel_world("live-test", sheet={"never": True})
+    world["windows"][0]["name"] = "Elsewhere"  # the Save panel is not the window it was
+    reply = drive("save_panel", world, window="Elsewhere", directory="/tmp/x/live-test",
+                  filename="song", folder_name="live-test", replace=False)
+    assert reply["ok"] is False
+    assert len(reply["_clock"]["g"]) == 2

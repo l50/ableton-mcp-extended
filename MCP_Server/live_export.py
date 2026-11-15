@@ -510,12 +510,23 @@ function dispatch(cmd) {
       var w = findWindow(p, cmd.window);
       var nameField = findControl(w, 'Save As:', ['AXTextField']);
       nameField.value = cmd.filename;
-      // Go to the folder: Cmd+Shift+G opens a path sheet on the panel.
-      SE.keystroke('g', {using: ['command down', 'shift down']});
+      // Go to the folder: Cmd+Shift+G opens a path sheet on the panel. The
+      // sheet can be slow, so wait up to 5 s, then re-send the shortcut once
+      // to the focused Save panel and wait up to 5 s more before giving up.
       var sheet = null;
-      for (var t = 0; t < 30 && !sheet; t++) {
-        delay(0.1);
-        sheet = safe(function () { return w.sheets.length ? w.sheets[0] : null; }, null);
+      for (var attempt = 0; attempt < 2 && !sheet; attempt++) {
+        if (attempt > 0) {
+          // Only re-send while the panel is still there: the keystroke goes
+          // to whatever is frontmost, never into another window.
+          if (safe(function () { return w.name(); }, null) !== cmd.window)
+            break;
+          safe(function () { w.actions.byName('AXRaise').perform(); }, null);
+        }
+        SE.keystroke('g', {using: ['command down', 'shift down']});
+        for (var t = 0; t < 50 && !sheet; t++) {
+          delay(0.1);
+          sheet = safe(function () { return w.sheets.length ? w.sheets[0] : null; }, null);
+        }
       }
       if (!sheet) return {ok: false, error: 'the Go to Folder sheet did not open in the Save panel'};
       var typed = false;
