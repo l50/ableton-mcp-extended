@@ -57,6 +57,8 @@ class Clip:
         self.looping = True
         self.loop_start = 0.0
         self.loop_end = end_time - start_time
+        self.file_path = None if is_midi else "/audio/" + (name or "clip") + ".wav"
+        self.warping = False
         self.is_playing = False
         self.is_recording = False
         self.set_notes = MagicMock()

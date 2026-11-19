@@ -46,6 +46,8 @@ _PLACEHOLDERS = {int: 1, float: 1.0, str: "x", bool: True}
 # Arguments that get a tool past its input checks to the command it exists for.
 _TOOL_ARGS = {
     "delete_arrangement_clip": {"clip_index": 1},
+    "copy_arrangement_clip_region": {"clip_index": 1},
+    "move_arrangement_clip": {"clip_index": 1},
     "set_arrangement_clip_property": {"muted": True},
     "delete_track": {"track_index": 1},
     "set_track_mute": {"track_index": 1},

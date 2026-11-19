@@ -49,6 +49,8 @@ MODIFYING_COMMANDS = (
     "duplicate_to_arrangement",
     "delete_arrangement_clip",
     "set_arrangement_clip_property",
+    "copy_arrangement_audio_region",
+    "move_arrangement_clip",
     "set_view",
     "control_arrangement_view",
     "manage_clip_automation",

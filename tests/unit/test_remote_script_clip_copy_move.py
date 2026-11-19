@@ -1,0 +1,495 @@
+"""Unit tests for the Remote Script's arrangement clip region copy and move,
+run against stub Live objects that duplicate, trim and delete clips the way
+Live does."""
+import os
+import sys
+import types
+from unittest.mock import MagicMock
+
+import pytest
+
+
+class _StubControlSurface:
+    def __init__(self, c_instance):
+        pass
+
+    def log_message(self, msg):
+        pass
+
+
+_framework = types.ModuleType("_Framework")
+_cs_module = types.ModuleType("_Framework.ControlSurface")
+_cs_module.ControlSurface = _StubControlSurface
+sys.modules.setdefault("_Framework", _framework)
+sys.modules.setdefault("_Framework.ControlSurface", _cs_module)
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
+from AbletonMCP_Remote_Script import AbletonMCP  # noqa: E402
+
+TEMPO = 120.0
+
+
+class WarpMarker:
+    def __init__(self, sample_time, beat_time):
+        self.sample_time = sample_time
+        self.beat_time = beat_time
+
+
+class Clip:
+    """An arrangement clip whose right edge follows its markers, as in Live.
+
+    Unwarped audio counts in seconds of the file, so its length in beats
+    follows the tempo; warped audio and MIDI count in beats.
+    """
+
+    def __init__(self, name="Take", start_time=0.0, audio=True, warping=False,
+                 loop_start=0.0, loop_end=10.0, looping=False, warp_markers=None,
+                 file_path="/Samples/Recorded/Take.wav", sample_length=48000 * 120,
+                 sample_rate=48000.0, gain=0.7, pitch_coarse=0, pitch_fine=0.0,
+                 warp_mode=4, track=None):
+        self._track = track
+        self.name = name
+        self.start_time = start_time
+        self.is_audio_clip = audio
+        self.is_midi_clip = not audio
+        self.warping = warping
+        self.looping = looping
+        self._loop_start = loop_start
+        self._loop_end = loop_end
+        self._start_marker = loop_start
+        self._end_marker = loop_end
+        self.warp_markers = list(warp_markers or [])
+        self.file_path = file_path if audio else None
+        self.sample_length = sample_length
+        self.sample_rate = sample_rate
+        self.gain = gain
+        self.pitch_coarse = pitch_coarse
+        self.pitch_fine = pitch_fine
+        self.warp_mode = warp_mode
+        self.muted = False
+        self.color = 0x112233
+        self.refuse = set()
+
+    def _check(self, prop, start, end):
+        if prop in self.refuse:
+            return
+        if start > end:
+            raise RuntimeError("start after end")
+
+    @property
+    def loop_start(self):
+        return self._loop_start
+
+    @loop_start.setter
+    def loop_start(self, value):
+        self._check("loop_start", value, self._loop_end)
+        if "loop_start" not in self.refuse:
+            self._loop_start = value
+
+    @property
+    def loop_end(self):
+        return self._loop_end
+
+    @loop_end.setter
+    def loop_end(self, value):
+        self._check("loop_end", self._loop_start, value)
+        if "loop_end" not in self.refuse:
+            self._loop_end = value
+
+    @property
+    def start_marker(self):
+        return self._start_marker
+
+    @start_marker.setter
+    def start_marker(self, value):
+        self._check("start_marker", value, self._end_marker)
+        if "start_marker" not in self.refuse:
+            self._start_marker = value
+
+    @property
+    def end_marker(self):
+        return self._end_marker
+
+    @end_marker.setter
+    def end_marker(self, value):
+        self._check("end_marker", self._start_marker, value)
+        if "end_marker" not in self.refuse:
+            self._end_marker = value
+
+    @property
+    def end_time(self):
+        span = self._loop_end - self._loop_start
+        if self.is_audio_clip and not self.warping:
+            span = span * TEMPO / 60.0
+        return self.start_time + span
+
+    def copy_to(self, track, start_time):
+        clip = Clip.__new__(Clip)
+        clip.__dict__.update(self.__dict__)
+        clip.warp_markers = list(self.warp_markers)
+        clip.refuse = set(self.refuse)
+        clip.start_time = start_time
+        clip._track = track
+        return clip
+
+
+class Track:
+    def __init__(self, name="Vocals", clips=(), midi=False):
+        self.name = name
+        self.has_midi_input = midi
+        self.has_audio_input = not midi
+        self.is_foldable = False
+        self.is_frozen = False
+        self.arrangement_clips = list(clips)
+        self.duplicate_clip_to_arrangement = MagicMock(side_effect=self._duplicate)
+        self.delete_clip = MagicMock(side_effect=self._delete)
+        self.mutate_copies = None
+
+    def _duplicate(self, clip, destination_time):
+        copy = clip.copy_to(self, destination_time)
+        if self.mutate_copies:
+            self.mutate_copies(copy)
+        end = copy.end_time
+        # Live overwrites what the copy lands on; drop fully covered clips.
+        self.arrangement_clips = [
+            c for c in self.arrangement_clips
+            if not (c.start_time >= destination_time and c.end_time <= end)]
+        self.arrangement_clips.append(copy)
+        self.arrangement_clips.sort(key=lambda c: c.start_time)
+
+    def _delete(self, clip):
+        self.arrangement_clips.remove(clip)
+
+
+class Song:
+    def __init__(self, tracks=(), return_tracks=()):
+        self.tracks = list(tracks)
+        self.return_tracks = list(return_tracks)
+        self.master_track = Track("Master")
+        self.tempo = TEMPO
+
+
+def make_script(*tracks):
+    script = AbletonMCP.__new__(AbletonMCP)
+    script._song = Song(tracks)
+    script.log_message = MagicMock()
+    return script
+
+
+def unwarped_take(**kw):
+    """A 120 s unwarped take showing 60-70 s of its file at beat 32."""
+    kw.setdefault("start_time", 32.0)
+    kw.setdefault("loop_start", 60.0)
+    kw.setdefault("loop_end", 70.0)
+    return Clip(**kw)
+
+
+def warped_take(**kw):
+    """A warped take: 2 beats per second up to 10 s, then 1 beat per second."""
+    markers = [WarpMarker(0.0, 0.0), WarpMarker(10.0, 20.0), WarpMarker(20.0, 30.0)]
+    kw.setdefault("warping", True)
+    kw.setdefault("warp_markers", markers)
+    kw.setdefault("loop_start", 0.0)
+    kw.setdefault("loop_end", 30.0)
+    return Clip(**kw)
+
+
+def region(script, **params):
+    base = {"track_index": 0, "clip_index": 0, "region_start": 66.10, "region_end": 67.04,
+            "destination_time": 8.0}
+    base.update(params)
+    return script._copy_arrangement_audio_region(base)
+
+
+def move(script, **params):
+    base = {"track_index": 0, "clip_index": 0, "destination_time": 100.0}
+    base.update(params)
+    return script._move_arrangement_clip(base)
+
+
+def clip_at(track, start):
+    matches = [c for c in track.arrangement_clips if abs(c.start_time - start) < 1e-6]
+    assert len(matches) == 1, [c.start_time for c in track.arrangement_clips]
+    return matches[0]
+
+
+# ── region copy ──────────────────────────────────────────────────────
+
+
+class TestCopyRegion:
+    def test_unwarped_region_copies_exact_seconds_of_same_file(self):
+        take = unwarped_take()
+        track = Track(clips=[take])
+        result = region(make_script(track))
+
+        copy = clip_at(track, 8.0)
+        assert copy.file_path == take.file_path
+        assert copy.warping is False
+        assert (copy.loop_start, copy.loop_end) == (66.10, 67.04)
+        assert (copy.start_marker, copy.end_marker) == (66.10, 67.04)
+        assert copy.end_time - copy.start_time == pytest.approx(0.94 * TEMPO / 60.0)
+        assert (copy.gain, copy.pitch_coarse, copy.pitch_fine, copy.warp_mode) == \
+            (0.7, 0, 0.0, 4)
+        assert result["region_start"] == 66.10 and result["region_end"] == 67.04
+        assert result["file_path"] == take.file_path and result["warping"] is False
+        assert result["source_clip"] == "Take" and result["destination_track"] == "Vocals"
+        assert result["overlapped_clips"] == []
+
+    def test_source_is_untouched_and_staging_copy_is_removed(self):
+        take = unwarped_take()
+        track = Track(clips=[take])
+        region(make_script(track))
+
+        assert len(track.arrangement_clips) == 2
+        assert (take.start_time, take.loop_start, take.loop_end) == (32.0, 60.0, 70.0)
+        staged = track.duplicate_clip_to_arrangement.call_args_list[0][0][1]
+        # Past the take's end (beat 52) and the reserved destination range.
+        assert staged >= 52.0 + 16.0
+        track.delete_clip.assert_called_once()
+
+    def test_warped_region_maps_seconds_through_warp_markers(self):
+        take = warped_take(looping=True)
+        track = Track(clips=[take])
+        region(make_script(track), region_start=5.0, region_end=15.0, destination_time=64.0)
+
+        copy = clip_at(track, 64.0)
+        # 5 s -> beat 10 (2 beats/s); 15 s -> beat 25 (1 beat/s after 10 s).
+        assert (copy.loop_start, copy.loop_end) == (10.0, 25.0)
+        assert copy.looping is False and copy.warping is True
+        assert copy.end_time - copy.start_time == pytest.approx(15.0)
+
+    def test_warped_region_extrapolates_past_last_marker(self):
+        take = warped_take(loop_end=40.0)
+        track = Track(clips=[take])
+        region(make_script(track), region_start=25.0, region_end=30.0, destination_time=64.0)
+        copy = clip_at(track, 64.0)
+        assert (copy.loop_start, copy.loop_end) == (35.0, 40.0)
+
+    def test_warp_markers_as_dicts(self):
+        take = warped_take(warp_markers=[{"sample_time": 0.0, "beat_time": 0.0},
+                                         {"sample_time": 4.0, "beat_time": 8.0}])
+        track = Track(clips=[take])
+        region(make_script(track), region_start=1.0, region_end=2.0, destination_time=64.0)
+        assert (clip_at(track, 64.0).loop_start, clip_at(track, 64.0).loop_end) == (2.0, 4.0)
+
+    def test_warped_without_markers_is_refused(self):
+        track = Track(clips=[warped_take(warp_markers=[WarpMarker(0.0, 0.0)])])
+        with pytest.raises(ValueError, match="fewer than two warp markers"):
+            region(make_script(track), region_start=1.0, region_end=2.0)
+        track.duplicate_clip_to_arrangement.assert_not_called()
+
+    def test_region_before_current_window_sets_start_first(self):
+        take = unwarped_take()
+        track = Track(clips=[take])
+        region(make_script(track), region_start=10.0, region_end=11.0)
+        copy = clip_at(track, 8.0)
+        assert (copy.loop_start, copy.loop_end) == (10.0, 11.0)
+
+    def test_region_after_current_window_sets_end_first(self):
+        take = unwarped_take()
+        track = Track(clips=[take])
+        region(make_script(track), region_start=90.0, region_end=91.5)
+        copy = clip_at(track, 8.0)
+        assert (copy.start_marker, copy.end_marker) == (90.0, 91.5)
+
+    def test_copy_to_another_audio_track_with_name(self):
+        take = unwarped_take()
+        src, dst = Track("Vocals", [take]), Track("Doubles")
+        result = region(make_script(src, dst), destination_track_index=1, name="DIE")
+        assert len(src.arrangement_clips) == 1
+        assert clip_at(dst, 8.0).name == "DIE"
+        assert result["name"] == "DIE" and result["destination_track"] == "Doubles"
+        assert result["source_track"] == "Vocals"
+
+    def test_by_clip_name(self):
+        track = Track(clips=[Clip("Other", 0.0), unwarped_take(name="Vocals 0001")])
+        result = region(make_script(track), clip_index=-1, clip_name="Vocals 0001",
+                        destination_time=200.0)
+        assert result["source_clip"] == "Vocals 0001"
+
+    def test_overlap_reported(self):
+        neighbour = Clip("Chorus", 8.5, loop_start=0.0, loop_end=1.0)
+        track = Track(clips=[unwarped_take(), neighbour])
+        result = region(make_script(track))
+        assert result["overlapped_clips"] == ["Chorus"]
+
+    @pytest.mark.parametrize("start,end", [(-1.0, 1.0), (5.0, 5.0), (6.0, 5.0), (100.0, 121.0)])
+    def test_region_outside_file_refused(self, start, end):
+        track = Track(clips=[unwarped_take()])
+        with pytest.raises(ValueError, match="not inside the clip's audio file"):
+            region(make_script(track), region_start=start, region_end=end)
+        track.duplicate_clip_to_arrangement.assert_not_called()
+
+    def test_midi_source_refused(self):
+        track = Track(clips=[Clip(audio=False)], midi=True)
+        with pytest.raises(ValueError, match="MIDI clip"):
+            region(make_script(track))
+
+    def test_midi_destination_refused(self):
+        script = make_script(Track(clips=[unwarped_take()]), Track("Keys", midi=True))
+        with pytest.raises(ValueError, match="MIDI track"):
+            region(script, destination_track_index=1)
+
+    def test_frozen_group_return_and_range_refused(self):
+        frozen = Track("Frozen")
+        frozen.is_frozen = True
+        group = Track("Group")
+        group.is_foldable = True
+        ret = Track("Reverb")
+        script = make_script(Track(clips=[unwarped_take()]), frozen, group, ret)
+        script._song.return_tracks = [ret]
+        for index, pattern in ((1, "frozen"), (2, "group"), (3, "return"),
+                               (9, "out of range")):
+            with pytest.raises((ValueError, IndexError), match=pattern):
+                region(script, destination_track_index=index)
+
+    def test_destination_outside_live_range_refused(self):
+        track = Track(clips=[unwarped_take()])
+        with pytest.raises(ValueError, match="outside Live's range"):
+            region(make_script(track), destination_time=-4.0)
+
+    def test_live_refusing_markers_aborts_before_destination(self):
+        take = unwarped_take()
+        take.refuse = {"loop_start", "start_marker"}
+        track = Track(clips=[take])
+        with pytest.raises(RuntimeError, match="did not narrow"):
+            region(make_script(track))
+        # Only the staged copy was made, and it was removed again.
+        assert track.duplicate_clip_to_arrangement.call_count == 1
+        assert track.arrangement_clips == [take]
+
+    def test_copy_differing_from_source_is_reported(self):
+        track = Track(clips=[unwarped_take()])
+        calls = []
+
+        def drop_gain(copy):
+            calls.append(copy)
+            if len(calls) == 2:
+                copy.gain = 0.1
+
+        track.mutate_copies = drop_gain
+        with pytest.raises(RuntimeError, match="differs from its source: gain"):
+            region(make_script(track))
+
+    def test_missing_copy_is_reported(self):
+        track = Track(clips=[unwarped_take()])
+        track.duplicate_clip_to_arrangement = MagicMock()
+        with pytest.raises(RuntimeError, match="did not create the copy"):
+            region(make_script(track))
+
+
+# ── move ─────────────────────────────────────────────────────────────
+
+
+class TestMove:
+    def test_move_later_on_same_track(self):
+        take = unwarped_take()
+        track = Track(clips=[take])
+        result = move(make_script(track))
+
+        assert take not in track.arrangement_clips
+        moved = clip_at(track, 100.0)
+        assert (moved.loop_start, moved.loop_end, moved.file_path) == \
+            (60.0, 70.0, take.file_path)
+        assert result["moved_from"] == 32.0 and result["staged_at"] is None
+        assert result["start_time"] == 100.0 and result["overlapped_clips"] == []
+        assert track.duplicate_clip_to_arrangement.call_count == 1
+
+    def test_move_overlapping_itself_stages_first(self):
+        take = unwarped_take()  # beats 32-52
+        track = Track(clips=[take])
+        result = move(make_script(track), destination_time=40.0)
+
+        assert [c.start_time for c in track.arrangement_clips] == [40.0]
+        assert result["staged_at"] >= 60.0 + 16.0
+        assert track.duplicate_clip_to_arrangement.call_count == 2
+        assert track.delete_clip.call_count == 2
+
+    def test_move_to_another_track(self):
+        take = warped_take(start_time=0.0)
+        src, dst = Track("A", [take]), Track("B")
+        result = move(make_script(src, dst), destination_track_index=1, destination_time=8.0)
+        assert src.arrangement_clips == []
+        assert clip_at(dst, 8.0).warping is True
+        assert result["source_track"] == "A" and result["destination_track"] == "B"
+
+    def test_move_midi_clip(self):
+        midi = Clip("Riff", 0.0, audio=False, loop_end=4.0)
+        track = Track("Keys", [midi], midi=True)
+        result = move(make_script(track), destination_time=16.0)
+        assert result["is_midi"] is True
+        assert [c.start_time for c in track.arrangement_clips] == [16.0]
+
+    def test_move_overlap_with_other_clip_reported(self):
+        take = unwarped_take()
+        other = Clip("Verse", 104.0, loop_start=0.0, loop_end=1.0)
+        track = Track(clips=[take, other])
+        result = move(make_script(track))
+        assert result["overlapped_clips"] == ["Verse"]
+
+    def test_move_to_same_place_refused(self):
+        track = Track(clips=[unwarped_take()])
+        with pytest.raises(ValueError, match="already at beat"):
+            move(make_script(track), destination_time=32.0)
+        track.duplicate_clip_to_arrangement.assert_not_called()
+
+    def test_bad_copy_is_removed_and_original_kept(self):
+        take = unwarped_take()
+        track = Track(clips=[take])
+        track.mutate_copies = lambda copy: setattr(copy, "pitch_coarse", 3)
+        with pytest.raises(RuntimeError, match="did not match the original"):
+            move(make_script(track))
+        assert track.arrangement_clips == [take]
+
+    def test_failed_final_copy_keeps_staged_copy(self):
+        take = unwarped_take()
+        track = Track(clips=[take])
+        calls = []
+
+        def break_second(copy):
+            calls.append(copy)
+            if len(calls) == 2:
+                copy.gain = 0.0
+
+        track.mutate_copies = break_second
+        with pytest.raises(RuntimeError, match="intact copy at beat"):
+            move(make_script(track), destination_time=40.0)
+        assert take not in track.arrangement_clips
+        assert len(track.arrangement_clips) == 1
+        assert track.arrangement_clips[0].gain == 0.7
+
+    def test_audio_clip_to_midi_track_refused(self):
+        script = make_script(Track(clips=[unwarped_take()]), Track("Keys", midi=True))
+        with pytest.raises(ValueError, match="MIDI track"):
+            move(script, destination_track_index=1)
+
+    def test_midi_clip_to_audio_track_refused(self):
+        script = make_script(Track("Keys", [Clip(audio=False)], midi=True), Track("Vox"))
+        with pytest.raises(ValueError, match="audio track"):
+            move(script, destination_track_index=1)
+
+
+class TestDispatch:
+    @pytest.mark.parametrize("command,handler", [
+        ("copy_arrangement_audio_region", "_copy_arrangement_audio_region"),
+        ("move_arrangement_clip", "_move_arrangement_clip"),
+    ])
+    def test_routes_to_handler(self, command, handler):
+        script = make_script()
+        setattr(script, handler, MagicMock(return_value={"ok": True}))
+        script.schedule_message = MagicMock(side_effect=lambda _delay, fn: fn())
+        response = script._process_command({"type": command, "params": {"x": 1}})
+        assert response == {"status": "success", "result": {"ok": True}}
+        getattr(script, handler).assert_called_once_with({"x": 1})
+
+
+class TestArrangementInfo:
+    def test_audio_clip_info_reports_file_and_warping(self):
+        info = make_script()._get_arrangement_clip_info(unwarped_take())
+        assert info["file_path"] == "/Samples/Recorded/Take.wav"
+        assert info["warping"] is False
+
+    def test_midi_clip_info_has_no_file(self):
+        info = make_script()._get_arrangement_clip_info(Clip(audio=False))
+        assert "file_path" not in info

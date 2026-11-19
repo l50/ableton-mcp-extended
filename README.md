@@ -49,6 +49,11 @@ This project provides comprehensive, programmatic control over the Ableton Live 
     * Perform batch edits on multiple notes in a single operation.
     * Adjust clip loop parameters and follow actions.
 
+* **Arrangement Clip Editing:**
+    * Copy part of an arrangement audio clip, given in seconds of its audio file, to a new bar on the same or another track with `copy_arrangement_clip_region`. The copy plays the original file, with no new audio file rendered.
+    * Move an arrangement clip to a new bar or track with `move_arrangement_clip`.
+    * See [Copying and moving arrangement clips](#copying-and-moving-arrangement-clips).
+
 * **Device and Parameter Control:**
     * Load instruments and effects from Ableton's browser by URI.
     * Get a full list of parameters for any device on a track.
@@ -250,6 +255,25 @@ These tools can't run in CI. The unit tests stub out the UI scripting. A guarded
 ```bash
 ABLETON_MCP_LIVE_TESTS=1 ABLETON_MCP_EXPORT_TESTS=1 \
     uv run --extra test python -m pytest -m integration tests/integration/test_live_export_live.py -s
+```
+
+---
+
+## Copying and Moving Arrangement Clips
+
+Live's API has no call that moves an arrangement clip or copies part of one. These two tools build both from what it does have: `Track.duplicate_clip_to_arrangement`, which accepts an arrangement clip, the clip's start and end markers, and `Track.delete_clip`.
+
+`copy_arrangement_clip_region` copies a region of an arrangement audio clip to a new position. The region is given in seconds of the clip's audio file (`region_start_seconds`, `region_end_seconds`), where 0 is the file's first sample, not the clip's left edge. `get_arrangement_info` lists each audio clip's file and, for unwarped clips, which seconds of the file the clip currently plays. The destination is a bar (`destination_bar`, 1-based) or a beat (`destination_beat`), on `destination_track_index` or, when that is 0, the source clip's own track. The copy references the source clip's own audio file, so no file is written to the project's Samples folder. It keeps the source's warping, warp mode, warp markers, gain and pitch, so an unwarped source still plays at its original speed. A region of a warped clip is converted to beats through the clip's warp markers, and the copy is not looped.
+
+`move_arrangement_clip` moves an arrangement clip, audio or MIDI, to a new bar or beat on the same track or on another track of the same kind. The clip is duplicated to the new position and the copy is compared with the original (audio file, markers, warping, gain, pitch, length, name, color, mute). Only when they match is the original deleted. A copy that doesn't match is deleted instead and the original is left as it was.
+
+Both tools address the source clip by `clip_index` (1-based) or `clip_name`. A copy overwrites whatever it lands on, the way pasting in Live does, and the reply lists the clips it overlapped. To keep anything else from being overwritten, every intermediate copy is made past the end of the destination track and removed afterwards. That covers the full-length copy a region is cut from, and the staging copy used when a clip moves onto a spot that overlaps itself.
+
+A guarded check runs both tools against a scratch Set in real Live. Run it only with a throwaway Set open:
+
+```bash
+ABLETON_MCP_LIVE_TESTS=1 ABLETON_MCP_CLIP_EDIT_FILE=/path/to/take.wav \
+    uv run --extra test python -m pytest -m integration tests/integration/test_arrangement_clip_edit_live.py -s
 ```
 
 ---
