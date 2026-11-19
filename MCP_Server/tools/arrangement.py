@@ -237,15 +237,18 @@ def create_arrangement_midi_clip(
             length = bar_to_beat(end_bar, num, denom) - position
 
     ti = to_zero_based(track_index, "track_index")
-    result = ableton.send_command(
-        "create_arrangement_clip", {"track_index": ti, "position": position, "length": length}
-    )
+    params = {"track_index": ti, "position": position, "length": length}
+    if name:
+        params["name"] = name
+    result = ableton.send_command("create_arrangement_clip", params)
 
     msg = (
         f"Created MIDI clip on track {track_index} at "
         f"bar {beat_to_bar(position, num, denom)}, "
         f"length {length} beats"
     )
+    if name:
+        msg += f", named '{result.get('name', name)}'"
     overlapped = result.get("overlapped_clips", [])
     if overlapped:
         msg += f"\nWarning: overlapped existing clips: {', '.join(overlapped)}"

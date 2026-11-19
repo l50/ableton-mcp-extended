@@ -11,15 +11,28 @@ from MCP_Server.tools.base import ableton_tool
 
 # Live's fader position for 0 dB, as a normalized 0.0-1.0 volume.
 UNITY_VOLUME = 0.85
+# dB at the top of the fader (volume 1.0).
+MAX_FADER_DB = 6.0
 # Pan values closer to zero than this are reported as "center".
 PAN_CENTER_TOLERANCE = 0.01
 
 
-def _format_db(volume: float) -> str:
-    """Approximate a normalized fader volume in dB relative to unity."""
-    if volume > 0:
-        return f"{20 * math.log10(volume / UNITY_VOLUME):+.1f} dB"
-    return "-inf dB"
+def _format_db(volume: float, display: str | None = None) -> str:
+    """Return the fader level in dB as Live shows it.
+
+    *display* is Live's own readout for the fader (from the Remote Script); it
+    is used verbatim when present. Otherwise fall back to an approximation of
+    Live's fader taper: 0.85 is 0 dB and 1.0 is +6 dB.
+    """
+    if display:
+        return display.strip()
+    if volume <= 0:
+        return "-inf dB"
+    if volume >= UNITY_VOLUME:
+        db = (volume - UNITY_VOLUME) / (1.0 - UNITY_VOLUME) * MAX_FADER_DB
+    else:
+        db = 20 * math.log10(volume / UNITY_VOLUME)
+    return f"{db:+.1f} dB"
 
 
 def _format_pan(pan: float) -> str:
@@ -98,7 +111,8 @@ def get_track_volume(ctx: Context, track_index: int) -> str:
     """Get the current fader volume and panning for a track.
 
     Returns the raw normalized value, its min/max range, and the panning.
-    Volume 0.85 = 0 dB unity gain. Use this before set_track_volume to
+    Volume 0.85 = 0 dB unity gain, 1.0 = +6 dB. The dB shown is Live's own
+    fader readout. Use this before set_track_volume to
     understand the current state.
 
     Parameters:
@@ -114,9 +128,9 @@ def get_track_volume(ctx: Context, track_index: int) -> str:
     vol_max = result.get("volume_max", 1)
     return (
         f"Track '{name}':\n"
-        f"  Volume: {vol:.4f} (range {vol_min:.2f}–{vol_max:.2f}) ≈ {_format_db(vol)}\n"
+        f"  Volume: {vol:.4f} (range {vol_min:.2f}–{vol_max:.2f}) ≈ {_format_db(vol, result.get('volume_display'))}\n"
         f"  Panning: {pan:.4f} ({_format_pan(pan)})\n"
-        f"  Unity gain (0 dB) = 0.85"
+        f"  Unity gain (0 dB) = 0.85, top of fader (+6 dB) = 1.0"
     )
 
 
@@ -140,7 +154,7 @@ def set_track_volume(ctx: Context, track_index: int, volume: float) -> str:
     result = ableton.send_command("set_track_volume", {"track_index": ti, "volume": volume})
     name = result.get("track_name", "?")
     vol = result.get("volume", volume)
-    return f"Set '{name}' fader to {vol:.4f} (≈ {_format_db(vol)})"
+    return f"Set '{name}' fader to {vol:.4f} (≈ {_format_db(vol, result.get('volume_display'))})"
 
 
 @ableton_tool("setting track panning")

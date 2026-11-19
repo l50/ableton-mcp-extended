@@ -233,6 +233,32 @@ class TestCreateArrangementMidiClipCommand:
 
     @patch('MCP_Server.tools.arrangement._get_time_signature', return_value=(4, 4))
     @patch('MCP_Server.connection.get_ableton_connection')
+    def test_name_is_forwarded(self, mock_conn, mock_ts):
+        mock_ableton = MagicMock()
+        mock_ableton.send_command.return_value = {"name": "Verse", "overlapped_clips": []}
+        mock_conn.return_value = mock_ableton
+
+        from MCP_Server.tools.arrangement import create_arrangement_midi_clip  # noqa: E402
+        result = create_arrangement_midi_clip(
+            MagicMock(), track_index=1, start_bar=1, end_bar=5, name="Verse")
+
+        assert mock_ableton.send_command.call_args[0][1]["name"] == "Verse"
+        assert "'Verse'" in result
+
+    @patch('MCP_Server.tools.arrangement._get_time_signature', return_value=(4, 4))
+    @patch('MCP_Server.connection.get_ableton_connection')
+    def test_name_omitted_when_empty(self, mock_conn, mock_ts):
+        mock_ableton = MagicMock()
+        mock_ableton.send_command.return_value = {"overlapped_clips": []}
+        mock_conn.return_value = mock_ableton
+
+        from MCP_Server.tools.arrangement import create_arrangement_midi_clip  # noqa: E402
+        create_arrangement_midi_clip(MagicMock(), track_index=1, start_bar=1, end_bar=5)
+
+        assert "name" not in mock_ableton.send_command.call_args[0][1]
+
+    @patch('MCP_Server.tools.arrangement._get_time_signature', return_value=(4, 4))
+    @patch('MCP_Server.connection.get_ableton_connection')
     def test_overlap_warning(self, mock_conn, mock_ts):
         # When the RS reports overlapped clips, the result should contain a warning
         mock_ableton = MagicMock()
