@@ -122,8 +122,6 @@ class Track:
         self.name = name
         self.has_midi_input = midi
         self.has_audio_input = not midi
-        self.is_foldable = False
-        self.is_frozen = False
         self.arrangement_clips = list(clips)
         self.duplicate_clip_to_arrangement = MagicMock(side_effect=self._duplicate)
         self.delete_clip = MagicMock(side_effect=self._delete)
@@ -228,7 +226,7 @@ class TestCopyRegion:
             (0.7, 0, 0.0, 4)
         assert result["region_start"] == 66.10 and result["region_end"] == 67.04
         assert result["file_path"] == take.file_path and result["warping"] is False
-        assert result["source_clip"] == "Take" and result["destination_track"] == "Vocals"
+        assert result["source_clip"] == "Take" and result["track"] == "Vocals"
         assert result["overlapped_clips"] == []
 
     def test_source_is_untouched_and_staging_copy_is_removed(self):
@@ -288,20 +286,13 @@ class TestCopyRegion:
         copy = clip_at(track, 8.0)
         assert (copy.start_marker, copy.end_marker) == (90.0, 91.5)
 
-    def test_copy_to_another_audio_track_with_name(self):
-        take = unwarped_take()
-        src, dst = Track("Vocals", [take]), Track("Doubles")
-        result = region(make_script(src, dst), destination_track_index=1, name="DIE")
-        assert len(src.arrangement_clips) == 1
-        assert clip_at(dst, 8.0).name == "DIE"
-        assert result["name"] == "DIE" and result["destination_track"] == "Doubles"
-        assert result["source_track"] == "Vocals"
-
     def test_by_clip_name(self):
         track = Track(clips=[Clip("Other", 0.0), unwarped_take(name="Vocals 0001")])
         result = region(make_script(track), clip_index=-1, clip_name="Vocals 0001",
                         destination_time=200.0)
         assert result["source_clip"] == "Vocals 0001"
+        assert result["name"] == "Vocals 0001"
+        assert clip_at(track, 200.0).name == "Vocals 0001"
 
     def test_overlap_reported(self):
         neighbour = Clip("Chorus", 8.5, loop_start=0.0, loop_end=1.0)
@@ -320,24 +311,6 @@ class TestCopyRegion:
         track = Track(clips=[Clip(audio=False)], midi=True)
         with pytest.raises(ValueError, match="MIDI clip"):
             region(make_script(track))
-
-    def test_midi_destination_refused(self):
-        script = make_script(Track(clips=[unwarped_take()]), Track("Keys", midi=True))
-        with pytest.raises(ValueError, match="MIDI track"):
-            region(script, destination_track_index=1)
-
-    def test_frozen_group_return_and_range_refused(self):
-        frozen = Track("Frozen")
-        frozen.is_frozen = True
-        group = Track("Group")
-        group.is_foldable = True
-        ret = Track("Reverb")
-        script = make_script(Track(clips=[unwarped_take()]), frozen, group, ret)
-        script._song.return_tracks = [ret]
-        for index, pattern in ((1, "frozen"), (2, "group"), (3, "return"),
-                               (9, "out of range")):
-            with pytest.raises((ValueError, IndexError), match=pattern):
-                region(script, destination_track_index=index)
 
     def test_destination_outside_live_range_refused(self):
         track = Track(clips=[unwarped_take()])
@@ -401,13 +374,13 @@ class TestMove:
         assert track.duplicate_clip_to_arrangement.call_count == 2
         assert track.delete_clip.call_count == 2
 
-    def test_move_to_another_track(self):
+    def test_move_warped_clip(self):
         take = warped_take(start_time=0.0)
-        src, dst = Track("A", [take]), Track("B")
-        result = move(make_script(src, dst), destination_track_index=1, destination_time=8.0)
-        assert src.arrangement_clips == []
-        assert clip_at(dst, 8.0).warping is True
-        assert result["source_track"] == "A" and result["destination_track"] == "B"
+        track = Track("A", [take])
+        result = move(make_script(track), destination_time=64.0)
+        assert take not in track.arrangement_clips
+        assert clip_at(track, 64.0).warping is True
+        assert result["track"] == "A"
 
     def test_move_midi_clip(self):
         midi = Clip("Riff", 0.0, audio=False, loop_end=4.0)
@@ -453,16 +426,6 @@ class TestMove:
         assert take not in track.arrangement_clips
         assert len(track.arrangement_clips) == 1
         assert track.arrangement_clips[0].gain == 0.7
-
-    def test_audio_clip_to_midi_track_refused(self):
-        script = make_script(Track(clips=[unwarped_take()]), Track("Keys", midi=True))
-        with pytest.raises(ValueError, match="MIDI track"):
-            move(script, destination_track_index=1)
-
-    def test_midi_clip_to_audio_track_refused(self):
-        script = make_script(Track("Keys", [Clip(audio=False)], midi=True), Track("Vox"))
-        with pytest.raises(ValueError, match="audio track"):
-            move(script, destination_track_index=1)
 
 
 class TestStepRunner:

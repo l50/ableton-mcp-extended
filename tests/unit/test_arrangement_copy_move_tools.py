@@ -25,13 +25,12 @@ COPY_REPLY = {
     "name": "Vocals 0001", "start_time": 64.0, "length": 1.88, "is_audio": True,
     "file_path": "/Coven/Samples/Recorded/Vocals 0001.wav", "warping": False,
     "gain": 0.4, "pitch_coarse": 0, "pitch_fine": 0.0, "source_clip": "Vocals 0001",
-    "destination_track": "Vocals", "overlapped_clips": [],
+    "track": "Vocals", "overlapped_clips": [],
 }
 
 MOVE_REPLY = {
     "name": "Riff", "start_time": 32.0, "moved_from": 0.0, "is_audio": False,
-    "is_midi": True, "source_track": "Keys", "destination_track": "Keys",
-    "overlapped_clips": [],
+    "is_midi": True, "track": "Keys", "overlapped_clips": [],
 }
 
 
@@ -44,34 +43,32 @@ def ableton():
 
 
 class TestCopyRegion:
-    def test_command_by_index_same_track_bar(self, ableton):
+    def test_command_by_index_bar(self, ableton):
         ableton.send_command.return_value = COPY_REPLY
         out = copy_arrangement_clip_region(MagicMock(), track_index=3, clip_index=2,
                                            region_start_seconds=66.10,
                                            region_end_seconds=67.04, destination_bar=17)
         ableton.send_command.assert_called_once_with("copy_arrangement_audio_region", {
-            "track_index": 2, "clip_index": 1, "destination_track_index": 2,
+            "track_index": 2, "clip_index": 1,
             "destination_time": 64.0, "region_start": 66.10, "region_end": 67.04})
-        assert "Copied 66.1-67.04s of 'Vocals 0001' to 'Vocals'" in out
+        assert "Copied 66.1-67.04s of 'Vocals 0001' on 'Vocals'" in out
         assert "bar 17 (beat 64.0)" in out
         assert "unwarped (plays at original speed)" in out
         assert "Vocals 0001.wav" in out and "gain 0.4" in out
         assert "Warning" not in out
         assert out.endswith("arrangement view.")
 
-    def test_command_by_name_other_track_beat_and_new_name(self, ableton):
+    def test_command_by_name_beat(self, ableton):
         ableton.send_command.return_value = dict(
-            COPY_REPLY, warping=True, overlapped_clips=["Chorus"], name="DIE")
+            COPY_REPLY, warping=True, overlapped_clips=["Chorus"], start_time=6.5)
         out = copy_arrangement_clip_region(MagicMock(), track_index=1,
                                            clip_name="Vocals 0001",
                                            region_start_seconds=1.0, region_end_seconds=2.0,
-                                           destination_track_index=4, destination_beat=6.5,
-                                           name="DIE")
+                                           destination_beat=6.5)
         ableton.send_command.assert_called_once_with("copy_arrangement_audio_region", {
             "track_index": 0, "clip_name": "Vocals 0001", "clip_index": -1,
-            "destination_track_index": 3, "destination_time": 6.5,
-            "region_start": 1.0, "region_end": 2.0, "name": "DIE"})
-        assert "as 'DIE'" in out and "| warped |" in out
+            "destination_time": 6.5, "region_start": 1.0, "region_end": 2.0})
+        assert "to bar 2 (beat 6.5)" in out and "| warped |" in out
         assert "Warning: overlapped existing clips: Chorus" in out
 
     def test_requires_a_clip_target(self, ableton):
@@ -79,12 +76,6 @@ class TestCopyRegion:
                                            region_start_seconds=0.0, region_end_seconds=1.0)
         assert out.startswith("Error copying arrangement clip region: clip_index must be >= 1")
         ableton.send_command.assert_not_called()
-
-    def test_negative_destination_track_refused(self, ableton):
-        out = copy_arrangement_clip_region(MagicMock(), track_index=1, clip_index=1,
-                                           region_start_seconds=0.0, region_end_seconds=1.0,
-                                           destination_track_index=-2)
-        assert "destination_track_index must be >= 0" in out
 
     def test_live_error_is_reported(self, ableton):
         ableton.send_command.side_effect = Exception("Region is not inside the file")
@@ -98,26 +89,24 @@ class TestMove:
         ableton.send_command.return_value = MOVE_REPLY
         out = move_arrangement_clip(MagicMock(), track_index=2, clip_index=1, destination_bar=9)
         ableton.send_command.assert_called_once_with("move_arrangement_clip", {
-            "track_index": 1, "clip_index": 0, "destination_track_index": 1,
-            "destination_time": 32.0})
-        assert out.startswith("Moved 'Riff' from 'Keys' bar 1 (beat 0.0) to 'Keys' bar 9")
+            "track_index": 1, "clip_index": 0, "destination_time": 32.0})
+        assert out.startswith("Moved 'Riff' on 'Keys' from bar 1 (beat 0.0) to bar 9")
         assert "Audio:" not in out
 
     def test_unnamed_clip(self, ableton):
         ableton.send_command.return_value = dict(MOVE_REPLY, name="")
         out = move_arrangement_clip(MagicMock(), track_index=2, clip_index=1, destination_bar=9)
-        assert out.startswith("Moved '(unnamed)' from 'Keys'")
+        assert out.startswith("Moved '(unnamed)' on 'Keys'")
 
-    def test_command_by_name_to_other_track(self, ableton):
+    def test_command_by_name_beat(self, ableton):
         ableton.send_command.return_value = dict(
-            COPY_REPLY, moved_from=8.0, source_track="Vocals", destination_track="Doubles",
-            overlapped_clips=["Verse"])
+            COPY_REPLY, moved_from=8.0, overlapped_clips=["Verse"])
         out = move_arrangement_clip(MagicMock(), track_index=1, clip_name="Vocals 0001",
-                                    destination_track_index=2, destination_beat=64.0)
+                                    destination_beat=64.0)
         ableton.send_command.assert_called_once_with("move_arrangement_clip", {
             "track_index": 0, "clip_name": "Vocals 0001", "clip_index": -1,
-            "destination_track_index": 1, "destination_time": 64.0})
-        assert "to 'Doubles' bar 17 (beat 64.0)" in out
+            "destination_time": 64.0})
+        assert "on 'Vocals' from bar 3 (beat 8.0) to bar 17 (beat 64.0)" in out
         assert "Warning: overlapped existing clips: Verse" in out
 
     def test_requires_a_clip_target(self, ableton):

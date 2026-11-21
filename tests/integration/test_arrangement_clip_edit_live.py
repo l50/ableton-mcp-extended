@@ -81,8 +81,7 @@ def test_copy_sub_second_region_unwarped(live, take):
     destination = source["end_time"] + 8
     result = live.send_command("copy_arrangement_audio_region", {
         "track_index": take, "clip_index": source["index"], "region_start": 0.5,
-        "region_end": 1.2, "destination_track_index": take,
-        "destination_time": destination})
+        "region_end": 1.2, "destination_time": destination})
     copy = _clip_at(live, take, destination)
     _, tempo = _clips(live, take)
 
@@ -101,8 +100,7 @@ def test_copy_onto_its_source_reports_the_overlap(live, take):
     source = _clip_at(live, take, BASE)
     result = live.send_command("copy_arrangement_audio_region", {
         "track_index": take, "clip_index": source["index"], "region_start": 0.5,
-        "region_end": 1.2, "destination_track_index": take,
-        "destination_time": BASE + 8})
+        "region_end": 1.2, "destination_time": BASE + 8})
     assert result["overlapped_clips"] == [source["name"]]
     assert abs(_clip_at(live, take, BASE + 8)["loop_start"] - 0.5) < TOLERANCE
 
@@ -111,7 +109,7 @@ def test_move_removes_original_and_keeps_copy(live, take):
     source = _clip_at(live, take, BASE)
     live.send_command("move_arrangement_clip", {
         "track_index": take, "clip_index": source["index"],
-        "destination_track_index": take, "destination_time": source["end_time"] + 8})
+        "destination_time": source["end_time"] + 8})
     assert _clip_at(live, take, BASE) is None
     moved = _clip_at(live, take, source["end_time"] + 8)
     for key in ("file_path", "warping", "loop_start", "loop_end", "name"):
@@ -122,7 +120,7 @@ def test_move_onto_itself(live, take):
     source = _clip_at(live, take, BASE)
     result = live.send_command("move_arrangement_clip", {
         "track_index": take, "clip_index": source["index"],
-        "destination_track_index": take, "destination_time": BASE + 0.5})
+        "destination_time": BASE + 0.5})
     assert result["staged_at"] is not None
     clips, _ = _clips(live, take)
     ours = [c for c in clips if c["start_time"] >= BASE - TOLERANCE]
