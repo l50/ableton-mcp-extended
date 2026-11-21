@@ -428,7 +428,8 @@ def move_arrangement_clip(
 
     Live has no move call, so the clip is duplicated to the new position, the
     copy is checked against the original (audio file, markers, warping, gain,
-    pitch, length), and only then is the original deleted.
+    pitch, and length unless it is unwarped audio), and only then is the
+    original deleted.
 
     Parameters:
     - track_index: Track holding the clip (1-based).

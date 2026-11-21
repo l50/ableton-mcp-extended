@@ -2370,11 +2370,25 @@ class AbletonMCP(ControlSurface):
             end = max(end, clip.end_time)
         return end + STAGING_GAP_BEATS
 
-    def _duplicate_arrangement_clip(self, track, clip, destination_time, length):
-        """Duplicate *clip* onto *track* at *destination_time* and return the copy."""
+    @staticmethod
+    def _check_arrangement_range(destination_time, length):
+        """Refuse a clip that would not fit inside Live's arrangement range."""
         if destination_time < 0 or destination_time + length > MAX_ARRANGEMENT_TIME:
             raise ValueError("Arrangement time {0} is outside Live's range (0-{1} beats)".format(
                 destination_time, MAX_ARRANGEMENT_TIME))
+
+    @staticmethod
+    def _length_comparable(snapshot):
+        """Whether a clip's length in beats is the same wherever it is placed.
+
+        An unwarped audio clip plays in seconds, so its length in beats follows
+        the tempo at its position; its file-seconds markers prove its content.
+        """
+        return not snapshot["is_audio"] or bool(snapshot["warping"])
+
+    def _duplicate_arrangement_clip(self, track, clip, destination_time, length):
+        """Duplicate *clip* onto *track* at *destination_time* and return the copy."""
+        self._check_arrangement_range(destination_time, length)
         before = list(track.arrangement_clips)
         track.duplicate_clip_to_arrangement(clip, destination_time)
         for candidate in track.arrangement_clips:
@@ -2463,6 +2477,7 @@ class AbletonMCP(ControlSurface):
                 # Unwarped length in beats follows the tempo; bound it by Live's
                 # fastest tempo so the staged clip can never be overwritten.
                 reserved = (region_end - region_start) * MAX_TEMPO_BPM / 60.0
+            self._check_arrangement_range(destination_time, reserved)
             source_length = src.end_time - src.start_time
             staging = self._staging_time(track, destination_time + reserved)
             staged = self._duplicate_arrangement_clip(
@@ -2492,13 +2507,15 @@ class AbletonMCP(ControlSurface):
                 track.delete_clip(staged)
 
             final = self._clip_snapshot(copy)
+            keys = ["loop_start", "loop_end", "start_marker", "end_marker", "looping"]
+            if self._length_comparable(source):
+                keys.append("length")
             wrong = self._snapshot_mismatches(source, final, AUDIO_CLIP_PROPERTIES) + \
-                self._snapshot_mismatches(
-                    trimmed, final, ("loop_start", "loop_end", "start_marker", "end_marker",
-                                     "length", "looping"))
+                self._snapshot_mismatches(trimmed, final, keys)
             if wrong:
-                raise RuntimeError("The copy at beat {0} differs from what was asked: {1}".format(
-                    destination_time, "; ".join(wrong)))
+                track.delete_clip(copy)
+                raise RuntimeError("The copy at beat {0} differs from what was asked, so it was "
+                                   "removed: {1}".format(destination_time, "; ".join(wrong)))
             result = self._audio_clip_info(copy)
             result.update({
                 "source_clip": src.name,
@@ -2520,8 +2537,9 @@ class AbletonMCP(ControlSurface):
         copy = self._duplicate_arrangement_clip(
             track, clip, destination_time, expected["length"])
         yield
-        wrong = self._snapshot_mismatches(expected, self._clip_snapshot(copy),
-                                          sorted(expected))
+        keys = sorted(key for key in expected
+                      if key != "length" or self._length_comparable(expected))
+        wrong = self._snapshot_mismatches(expected, self._clip_snapshot(copy), keys)
         if wrong:
             track.delete_clip(copy)
             raise RuntimeError("The copy at beat {0} did not match the original, so it was "
@@ -2546,6 +2564,7 @@ class AbletonMCP(ControlSurface):
             if abs(destination_time - original_start) <= CLIP_TIME_TOLERANCE:
                 raise ValueError("Clip '{0}' is already at beat {1}".format(
                     src.name, destination_time))
+            self._check_arrangement_range(destination_time, length)
             overlapped = self._overlapping_clip_names(
                 track, destination_time, length, exclude=src)
             overlaps_itself = destination_time < src.end_time and \

@@ -93,6 +93,7 @@ class Clip:
         self.warp_mode = warp_mode
         self.muted = False
         self.color = 0x112233
+        self.tempo = TEMPO
 
     def commit(self):
         self._committed.update(self._pending)
@@ -102,7 +103,7 @@ class Clip:
     def end_time(self):
         span = self._committed["loop_end"] - self._committed["loop_start"]
         if self.is_audio_clip and not self.warping:
-            span = span * TEMPO / 60.0
+            span = span * self.tempo / 60.0
         return self.start_time + span
 
     def copy_to(self, start_time):
@@ -117,6 +118,14 @@ class Clip:
         return clip
 
 
+class _LongerClip(Clip):
+    """A copy that comes out 4 beats longer than its markers say."""
+
+    @property
+    def end_time(self):
+        return Clip.end_time.fget(self) + 4.0
+
+
 class Track:
     def __init__(self, name="Vocals", clips=(), midi=False):
         self.name = name
@@ -126,9 +135,11 @@ class Track:
         self.duplicate_clip_to_arrangement = MagicMock(side_effect=self._duplicate)
         self.delete_clip = MagicMock(side_effect=self._delete)
         self.mutate_copies = None
+        self.tempo_at = lambda time: TEMPO
 
     def _duplicate(self, clip, destination_time):
         copy = clip.copy_to(destination_time)
+        copy.tempo = self.tempo_at(destination_time)
         if self.mutate_copies:
             self.mutate_copies(copy)
         end = copy.end_time
@@ -312,10 +323,26 @@ class TestCopyRegion:
         with pytest.raises(ValueError, match="MIDI clip"):
             region(make_script(track))
 
-    def test_destination_outside_live_range_refused(self):
-        track = Track(clips=[unwarped_take()])
+    @pytest.mark.parametrize("destination", [-4.0, 1576800.0 - 1.0])
+    def test_destination_outside_live_range_refused_before_any_change(self, destination):
+        take = unwarped_take()
+        track = Track(clips=[take])
         with pytest.raises(ValueError, match="outside Live's range"):
-            region(make_script(track), destination_time=-4.0)
+            region(make_script(track), destination_time=destination)
+        track.duplicate_clip_to_arrangement.assert_not_called()
+        assert track.arrangement_clips == [take]
+
+    def test_unwarped_copy_to_spot_with_other_tempo(self):
+        take = unwarped_take()
+        track = Track(clips=[take])
+        track.tempo_at = lambda time: 60.0 if time < 30.0 else TEMPO
+        result = region(make_script(track))
+
+        copy = clip_at(track, 8.0)
+        assert (copy.start_marker, copy.end_marker) == (66.10, 67.04)
+        assert copy.end_time - copy.start_time == pytest.approx(0.94)
+        assert result["start_time"] == 8.0
+        assert len(track.arrangement_clips) == 2
 
     def test_live_refusing_markers_aborts_before_destination(self):
         take = unwarped_take()
@@ -336,9 +363,12 @@ class TestCopyRegion:
             if len(calls) == 2:
                 copy.gain = 0.1
 
+        take = track.arrangement_clips[0]
         track.mutate_copies = drop_gain
-        with pytest.raises(RuntimeError, match="differs from what was asked: gain"):
+        with pytest.raises(RuntimeError, match="differs from what was asked, so it was "
+                                               "removed: gain"):
             region(make_script(track))
+        assert track.arrangement_clips == [take]
 
     def test_missing_copy_is_reported(self):
         track = Track(clips=[unwarped_take()])
@@ -395,6 +425,46 @@ class TestMove:
         track = Track(clips=[take, other])
         result = move(make_script(track))
         assert result["overlapped_clips"] == ["Verse"]
+
+    @pytest.mark.parametrize("start,destination", [(0.0, -2.0), (32.0, 1576800.0 - 5.0)])
+    def test_destination_outside_live_range_refused_before_any_change(self, start,
+                                                                        destination):
+        take = unwarped_take(start_time=start)
+        track = Track(clips=[take])
+        with pytest.raises(ValueError, match="outside Live's range"):
+            move(make_script(track), destination_time=destination)
+        track.duplicate_clip_to_arrangement.assert_not_called()
+        track.delete_clip.assert_not_called()
+        assert track.arrangement_clips == [take]
+
+    def test_unwarped_move_to_spot_with_other_tempo(self):
+        take = unwarped_take()
+        track = Track(clips=[take])
+        track.tempo_at = lambda time: 90.0 if time >= 100.0 else TEMPO
+        move(make_script(track))
+        moved = clip_at(track, 100.0)
+        assert track.arrangement_clips == [moved]
+        assert (moved.start_marker, moved.end_marker) == (60.0, 70.0)
+        assert moved.end_time - moved.start_time == pytest.approx(15.0)
+
+    def test_unwarped_move_onto_itself_with_other_staging_tempo(self):
+        take = unwarped_take()  # beats 32-52
+        track = Track(clips=[take])
+        track.tempo_at = lambda time: 60.0 if time >= 70.0 else TEMPO
+        result = move(make_script(track), destination_time=40.0)
+        assert result["staged_at"] >= 70.0
+        moved = clip_at(track, 40.0)
+        assert track.arrangement_clips == [moved]
+        assert (moved.start_marker, moved.end_marker) == (60.0, 70.0)
+
+    def test_warped_length_mismatch_still_refused(self):
+        take = warped_take(start_time=0.0)
+        track = Track(clips=[take])
+        track.mutate_copies = lambda copy: setattr(copy, "__class__", _LongerClip)
+        with pytest.raises(RuntimeError, match="did not match the original, so it was "
+                                               "removed: length"):
+            move(make_script(track))
+        assert track.arrangement_clips == [take]
 
     def test_move_to_same_place_refused(self):
         track = Track(clips=[unwarped_take()])
