@@ -1,7 +1,6 @@
 """Track tools: info, creation, naming, mixer volume/panning and deletion."""
 
 import json
-import math
 
 from mcp.server.fastmcp import Context
 
@@ -12,8 +11,15 @@ from MCP_Server.tools.base import ableton_tool
 # Live's fader taper, measured from Live 12's own readout: (normalized volume, dB).
 # Above 0.4 the taper is linear at 40 dB per unit; below it curves down to -inf.
 FADER_TAPER = (
-    (0.05, -57.2), (0.1, -48.6), (0.15, -41.0), (0.2, -34.4), (0.25, -28.8),
-    (0.3, -24.2), (0.35, -20.6), (0.4, -18.0), (1.0, 6.0),
+    (0.05, -57.2),
+    (0.1, -48.6),
+    (0.15, -41.0),
+    (0.2, -34.4),
+    (0.25, -28.8),
+    (0.3, -24.2),
+    (0.35, -20.6),
+    (0.4, -18.0),
+    (1.0, 6.0),
 )
 # Pan values closer to zero than this are reported as "center".
 PAN_CENTER_TOLERANCE = 0.01
@@ -34,7 +40,7 @@ def _format_db(volume: float, display: str | None = None) -> str:
     if volume < FADER_TAPER[0][0]:
         return f"< {FADER_TAPER[0][1]:+.1f} dB"
     volume = min(volume, 1.0)
-    for (v0, db0), (v1, db1) in zip(FADER_TAPER, FADER_TAPER[1:]):
+    for (v0, db0), (v1, db1) in zip(FADER_TAPER, FADER_TAPER[1:], strict=False):
         if volume <= v1:
             return f"{db0 + (volume - v0) / (v1 - v0) * (db1 - db0):+.1f} dB"
     return f"{FADER_TAPER[-1][1]:+.1f} dB"
