@@ -143,10 +143,16 @@ class Track:
         if self.mutate_copies:
             self.mutate_copies(copy)
         end = copy.end_time
-        # Live overwrites what the copy lands on; drop fully covered clips.
-        self.arrangement_clips = [
-            c for c in self.arrangement_clips
-            if not (c.start_time >= destination_time and c.end_time <= end)]
+        # Live overwrites what the copy lands on: a fully covered clip is gone,
+        # and a partly covered one is cut into a new clip object.
+        kept = []
+        for c in self.arrangement_clips:
+            if c.start_time >= destination_time and c.end_time <= end:
+                continue
+            if c.start_time < end and c.end_time > destination_time:
+                c = c.copy_to(c.start_time)
+            kept.append(c)
+        self.arrangement_clips = kept
         self.arrangement_clips.append(copy)
         self.arrangement_clips.sort(key=lambda c: c.start_time)
 
@@ -344,6 +350,14 @@ class TestCopyRegion:
         assert result["start_time"] == 8.0
         assert len(track.arrangement_clips) == 2
 
+    def test_overlap_judged_by_copy_span_at_destination_tempo(self):
+        neighbour = Clip("Chorus", 10.5, loop_start=0.0, loop_end=1.0)
+        track = Track(clips=[unwarped_take(), neighbour])
+        track.tempo_at = lambda time: 240.0 if time < 30.0 else TEMPO
+        result = region(make_script(track))
+        assert clip_at(track, 8.0).end_time == pytest.approx(8.0 + 0.94 * 4.0)
+        assert result["overlapped_clips"] == ["Chorus"]
+
     def test_live_refusing_markers_aborts_before_destination(self):
         take = unwarped_take()
         take.refuse = {"loop_start", "start_marker"}
@@ -456,6 +470,34 @@ class TestMove:
         moved = clip_at(track, 40.0)
         assert track.arrangement_clips == [moved]
         assert (moved.start_marker, moved.end_marker) == (60.0, 70.0)
+
+    def test_unwarped_move_onto_itself_at_faster_tempo_keeps_staging_clear(self):
+        take = unwarped_take(loop_start=0.0, loop_end=60.0)  # beats 32-152
+        track = Track(clips=[take])
+        track.tempo_at = lambda time: 140.0 if time < 100.0 else TEMPO
+        result = move(make_script(track), destination_time=40.0)
+        moved = clip_at(track, 40.0)
+        assert moved.end_time == pytest.approx(180.0)
+        assert result["staged_at"] >= 180.0 + 16.0
+        assert track.arrangement_clips == [moved]
+
+    def test_unwarped_move_earlier_at_faster_tempo_stages_first(self):
+        take = unwarped_take(start_time=200.0)  # beats 200-220 at 120 BPM
+        track = Track(clips=[take])
+        track.tempo_at = lambda time: 240.0 if time < 190.0 else TEMPO
+        result = move(make_script(track), destination_time=170.0)
+        moved = clip_at(track, 170.0)
+        assert moved.end_time == pytest.approx(210.0)
+        assert result["staged_at"] is not None
+        assert track.arrangement_clips == [moved]
+
+    def test_move_overlap_judged_by_copy_span_at_destination_tempo(self):
+        other = Clip("Verse", 130.0, loop_start=0.0, loop_end=1.0)
+        track = Track(clips=[unwarped_take(), other])
+        track.tempo_at = lambda time: 240.0 if 90.0 <= time < 125.0 else TEMPO
+        result = move(make_script(track))
+        assert clip_at(track, 100.0).end_time == pytest.approx(140.0)
+        assert result["overlapped_clips"] == ["Verse"]
 
     def test_warped_length_mismatch_still_refused(self):
         take = warped_take(start_time=0.0)
