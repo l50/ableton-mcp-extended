@@ -359,7 +359,8 @@ def _overlap_warning(result: dict) -> str:
         return ""
     return (
         f"\nWarning: overlapped existing clips: {', '.join(overlapped)}"
-        " (Live shortens or replaces the parts it lands on)"
+        " (as with pasting, Live cuts out the part the new clip covers: a clip it lands"
+        " inside is split around it)"
     )
 
 
@@ -464,7 +465,7 @@ def move_arrangement_clip(
     start = result.get("start_time", params["destination_time"])
     old = result.get("moved_from", 0)
     msg = (
-        f"Moved '{result.get('name')}' from '{result.get('source_track')}' bar "
+        f"Moved '{result.get('name') or '(unnamed)'}' from '{result.get('source_track')}' bar "
         f"{beat_to_bar(old, num, denom)} (beat {old}) to '{result.get('destination_track')}' "
         f"bar {beat_to_bar(start, num, denom)} (beat {start})"
     )

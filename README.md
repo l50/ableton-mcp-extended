@@ -267,7 +267,9 @@ Live's API has no call that moves an arrangement clip or copies part of one. The
 
 `move_arrangement_clip` moves an arrangement clip, audio or MIDI, to a new bar or beat on the same track or on another track of the same kind. The clip is duplicated to the new position and the copy is compared with the original (audio file, markers, warping, gain, pitch, length, name, color, mute). Only when they match is the original deleted. A copy that doesn't match is deleted instead and the original is left as it was.
 
-Both tools address the source clip by `clip_index` (1-based) or `clip_name`. A copy overwrites whatever it lands on, the way pasting in Live does, and the reply lists the clips it overlapped. To keep anything else from being overwritten, every intermediate copy is made past the end of the destination track and removed afterwards. That covers the full-length copy a region is cut from, and the staging copy used when a clip moves onto a spot that overlaps itself.
+Both tools address the source clip by `clip_index` (1-based) or `clip_name`. A copy overwrites whatever it lands on, the way pasting in Live does: Live cuts the covered part out of the clips underneath, so a clip the copy lands inside is split in two around it. The reply lists the clips it overlapped. To keep anything else from being overwritten, every intermediate copy is made past the end of the destination track and removed afterwards. That covers the full-length copy a region is cut from, and the staging copy used when a clip moves onto a spot that overlaps itself.
+
+Live applies new clip markers only when the Remote Script hands control back to it, so until then a duplicate still copies the clip as it was. Both commands therefore run in steps on Live's main thread, letting Live commit each change before the next step reads or copies the clip. A region copy or move takes a few hundred milliseconds.
 
 A guarded check runs both tools against a scratch Set in real Live. Run it only with a throwaway Set open:
 

@@ -369,9 +369,13 @@ class AbletonMCP(ControlSurface):
                             val = params.get("value", None)
                             result = self._set_arrangement_clip_property(ti, ci, prop, val, cn)
                         elif command_type == "copy_arrangement_audio_region":
-                            result = self._copy_arrangement_audio_region(params)
+                            self._run_steps(self._copy_arrangement_audio_region(params),
+                                            response_queue)
+                            return
                         elif command_type == "move_arrangement_clip":
-                            result = self._move_arrangement_clip(params)
+                            self._run_steps(self._move_arrangement_clip(params),
+                                            response_queue)
+                            return
                         elif command_type == "set_view":
                             vn = params.get("view_name", "Arranger")
                             result = self._set_view(vn)
@@ -2280,6 +2284,27 @@ class AbletonMCP(ControlSurface):
     # that is not yet the final clip is staged past the end of the destination
     # track, where nothing can be overwritten, and deleted afterwards.
 
+    def _run_steps(self, steps, response_queue):
+        """Run a stepped handler, one Live main-thread tick per step.
+
+        Live applies clip edits such as new markers only when the current
+        tick ends: until then end_time keeps its old value and a duplicate
+        copies the clip as it was. A stepped handler is a generator that
+        yields wherever it needs Live to commit what it has done so far; it
+        resumes on the next tick, and its return value is the reply.
+        """
+        try:
+            next(steps)
+        except StopIteration as done:
+            response_queue.put({"status": "success", "result": done.value})
+            return
+        except Exception as e:
+            self.log_message("Error in main thread task: " + str(e))
+            self.log_message(traceback.format_exc())
+            response_queue.put({"status": "error", "message": str(e)})
+            return
+        self.schedule_message(1, lambda: self._run_steps(steps, response_queue))
+
     def _clip_snapshot(self, clip):
         """The clip settings a copy or move must carry over unchanged."""
         snap = {
@@ -2427,9 +2452,10 @@ class AbletonMCP(ControlSurface):
     def _copy_arrangement_audio_region(self, params):
         """Copy part of an arrangement audio clip, by seconds of its file, to a new spot.
 
-        The copy references the source clip's own audio file; nothing is
-        rendered. It keeps the source's warp state, warp mode, warp markers,
-        gain and pitch, so an unwarped source still plays at its original speed.
+        A stepped handler (see _run_steps). The copy references the source
+        clip's own audio file; nothing is rendered. It keeps the source's warp
+        state, warp mode, warp markers, gain and pitch, so an unwarped source
+        still plays at its original speed.
         """
         try:
             track_index = params.get("track_index", 0)
@@ -2463,15 +2489,19 @@ class AbletonMCP(ControlSurface):
             staging = self._staging_time(dst_track, destination_time + reserved)
             staged = self._duplicate_arrangement_clip(
                 dst_track, src, staging, max(source_length, reserved))
+            yield
             try:
                 if staged.looping:
                     staged.looping = False
+                    yield
                 self._set_clip_window(staged, window_start, window_end)
+                yield
                 trimmed = self._clip_snapshot(staged)
-                wrong = self._snapshot_mismatches(
-                    {"loop_start": window_start, "loop_end": window_end,
-                     "start_marker": window_start, "end_marker": window_end},
-                    trimmed, ("loop_start", "loop_end", "start_marker", "end_marker"))
+                expected = {"loop_start": window_start, "loop_end": window_end,
+                            "start_marker": window_start, "end_marker": window_end}
+                if src.warping:
+                    expected["length"] = window_end - window_start
+                wrong = self._snapshot_mismatches(expected, trimmed, sorted(expected))
                 if wrong:
                     raise RuntimeError("Live did not narrow the copy to the region: " +
                                        "; ".join(wrong))
@@ -2479,17 +2509,22 @@ class AbletonMCP(ControlSurface):
                 overlapped = self._overlapping_clip_names(dst_track, destination_time, length)
                 copy = self._duplicate_arrangement_clip(
                     dst_track, staged, destination_time, length)
+                yield
             finally:
                 dst_track.delete_clip(staged)
 
             if params.get("name"):
                 copy.name = params["name"]
+            yield
+            final = self._clip_snapshot(copy)
+            wrong = self._snapshot_mismatches(source, final, AUDIO_CLIP_PROPERTIES) + \
+                self._snapshot_mismatches(
+                    trimmed, final, ("loop_start", "loop_end", "start_marker", "end_marker",
+                                     "length", "looping"))
+            if wrong:
+                raise RuntimeError("The copy at beat {0} differs from what was asked: {1}".format(
+                    destination_time, "; ".join(wrong)))
             result = self._audio_clip_info(copy)
-            kept = self._snapshot_mismatches(
-                source, self._clip_snapshot(copy), AUDIO_CLIP_PROPERTIES)
-            if kept:
-                raise RuntimeError("The copy at beat {0} differs from its source: {1}".format(
-                    destination_time, "; ".join(kept)))
             result.update({
                 "source_clip": src.name,
                 "source_track": src_track.name,
@@ -2504,9 +2539,13 @@ class AbletonMCP(ControlSurface):
             raise
 
     def _verified_duplicate(self, track, clip, expected, destination_time):
-        """Duplicate *clip* and check the copy matches *expected*; drop it if not."""
+        """Duplicate *clip* and check the copy matches *expected*; drop it if not.
+
+        A step generator for use with ``yield from``; returns the copy.
+        """
         copy = self._duplicate_arrangement_clip(
             track, clip, destination_time, expected["length"])
+        yield
         wrong = self._snapshot_mismatches(expected, self._clip_snapshot(copy),
                                           sorted(expected))
         if wrong:
@@ -2518,9 +2557,10 @@ class AbletonMCP(ControlSurface):
     def _move_arrangement_clip(self, params):
         """Move an arrangement clip: copy it, verify the copy, then delete the original.
 
-        When the new spot overlaps the clip itself on the same track, the copy
-        is first staged past the end of the track, so the original is never
-        overwritten while it is still the only intact version.
+        A stepped handler (see _run_steps). When the new spot overlaps the clip
+        itself on the same track, the copy is first staged past the end of the
+        track, so the original is never overwritten while it is still the only
+        intact version.
         """
         try:
             track_index = params.get("track_index", 0)
@@ -2544,18 +2584,22 @@ class AbletonMCP(ControlSurface):
             staged_at = None
             if overlaps_itself:
                 staged_at = self._staging_time(dst_track, destination_time + length)
-                staged = self._verified_duplicate(dst_track, src, source, staged_at)
+                staged = yield from self._verified_duplicate(dst_track, src, source, staged_at)
                 src_track.delete_clip(src)
+                yield
                 try:
-                    moved = self._verified_duplicate(dst_track, staged, source, destination_time)
+                    moved = yield from self._verified_duplicate(
+                        dst_track, staged, source, destination_time)
                 except Exception as e:
                     raise RuntimeError("{0}. The original was already replaced by an intact "
                                        "copy at beat {1} on track '{2}', which was kept".format(
                                            e, staged_at, dst_track.name))
                 dst_track.delete_clip(staged)
             else:
-                moved = self._verified_duplicate(dst_track, src, source, destination_time)
+                moved = yield from self._verified_duplicate(
+                    dst_track, src, source, destination_time)
                 src_track.delete_clip(src)
+            yield
 
             result = self._audio_clip_info(moved)
             result.update({

@@ -103,6 +103,11 @@ class TestMove:
         assert out.startswith("Moved 'Riff' from 'Keys' bar 1 (beat 0.0) to 'Keys' bar 9")
         assert "Audio:" not in out
 
+    def test_unnamed_clip(self, ableton):
+        ableton.send_command.return_value = dict(MOVE_REPLY, name="")
+        out = move_arrangement_clip(MagicMock(), track_index=2, clip_index=1, destination_bar=9)
+        assert out.startswith("Moved '(unnamed)' from 'Keys'")
+
     def test_command_by_name_to_other_track(self, ableton):
         ableton.send_command.return_value = dict(
             COPY_REPLY, moved_from=8.0, source_track="Vocals", destination_track="Doubles",

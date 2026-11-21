@@ -36,29 +36,53 @@ class WarpMarker:
         self.beat_time = beat_time
 
 
+def _deferred(prop, low=None, high=None):
+    """A clip setting that, as in Live, reads back at once but takes effect
+    (end_time, duplicates) only when the main-thread tick ends."""
+
+    def get(self):
+        return self._pending.get(prop, self._committed[prop])
+
+    def set(self, value):
+        if prop not in self.refuse:
+            start = value if prop == low else getattr(self, low) if low else None
+            end = value if prop == high else getattr(self, high) if high else None
+            if start is not None and end is not None and start > end:
+                raise RuntimeError("start after end")
+            self._pending[prop] = value
+
+    return property(get, set)
+
+
 class Clip:
-    """An arrangement clip whose right edge follows its markers, as in Live.
+    """An arrangement clip whose right edge follows its committed markers.
 
     Unwarped audio counts in seconds of the file, so its length in beats
-    follows the tempo; warped audio and MIDI count in beats.
+    follows the tempo; warped audio and MIDI count in beats. Marker and loop
+    edits wait for commit(), which the step driver calls on every yield.
     """
+
+    loop_start = _deferred("loop_start", "loop_start", "loop_end")
+    loop_end = _deferred("loop_end", "loop_start", "loop_end")
+    start_marker = _deferred("start_marker", "start_marker", "end_marker")
+    end_marker = _deferred("end_marker", "start_marker", "end_marker")
+    looping = _deferred("looping")
 
     def __init__(self, name="Take", start_time=0.0, audio=True, warping=False,
                  loop_start=0.0, loop_end=10.0, looping=False, warp_markers=None,
                  file_path="/Samples/Recorded/Take.wav", sample_length=48000 * 120,
                  sample_rate=48000.0, gain=0.7, pitch_coarse=0, pitch_fine=0.0,
-                 warp_mode=4, track=None):
-        self._track = track
+                 warp_mode=4):
+        self._committed = {"loop_start": loop_start, "loop_end": loop_end,
+                           "start_marker": loop_start, "end_marker": loop_end,
+                           "looping": looping}
+        self._pending = {}
+        self.refuse = set()
         self.name = name
         self.start_time = start_time
         self.is_audio_clip = audio
         self.is_midi_clip = not audio
         self.warping = warping
-        self.looping = looping
-        self._loop_start = loop_start
-        self._loop_end = loop_end
-        self._start_marker = loop_start
-        self._end_marker = loop_end
         self.warp_markers = list(warp_markers or [])
         self.file_path = file_path if audio else None
         self.sample_length = sample_length
@@ -69,68 +93,27 @@ class Clip:
         self.warp_mode = warp_mode
         self.muted = False
         self.color = 0x112233
-        self.refuse = set()
 
-    def _check(self, prop, start, end):
-        if prop in self.refuse:
-            return
-        if start > end:
-            raise RuntimeError("start after end")
-
-    @property
-    def loop_start(self):
-        return self._loop_start
-
-    @loop_start.setter
-    def loop_start(self, value):
-        self._check("loop_start", value, self._loop_end)
-        if "loop_start" not in self.refuse:
-            self._loop_start = value
-
-    @property
-    def loop_end(self):
-        return self._loop_end
-
-    @loop_end.setter
-    def loop_end(self, value):
-        self._check("loop_end", self._loop_start, value)
-        if "loop_end" not in self.refuse:
-            self._loop_end = value
-
-    @property
-    def start_marker(self):
-        return self._start_marker
-
-    @start_marker.setter
-    def start_marker(self, value):
-        self._check("start_marker", value, self._end_marker)
-        if "start_marker" not in self.refuse:
-            self._start_marker = value
-
-    @property
-    def end_marker(self):
-        return self._end_marker
-
-    @end_marker.setter
-    def end_marker(self, value):
-        self._check("end_marker", self._start_marker, value)
-        if "end_marker" not in self.refuse:
-            self._end_marker = value
+    def commit(self):
+        self._committed.update(self._pending)
+        self._pending = {}
 
     @property
     def end_time(self):
-        span = self._loop_end - self._loop_start
+        span = self._committed["loop_end"] - self._committed["loop_start"]
         if self.is_audio_clip and not self.warping:
             span = span * TEMPO / 60.0
         return self.start_time + span
 
-    def copy_to(self, track, start_time):
+    def copy_to(self, start_time):
+        """A duplicate, made from the committed state only."""
         clip = Clip.__new__(Clip)
         clip.__dict__.update(self.__dict__)
+        clip._committed = dict(self._committed)
+        clip._pending = {}
         clip.warp_markers = list(self.warp_markers)
         clip.refuse = set(self.refuse)
         clip.start_time = start_time
-        clip._track = track
         return clip
 
 
@@ -147,7 +130,7 @@ class Track:
         self.mutate_copies = None
 
     def _duplicate(self, clip, destination_time):
-        copy = clip.copy_to(self, destination_time)
+        copy = clip.copy_to(destination_time)
         if self.mutate_copies:
             self.mutate_copies(copy)
         end = copy.end_time
@@ -195,17 +178,29 @@ def warped_take(**kw):
     return Clip(**kw)
 
 
+def drive(script, steps):
+    """Run a stepped handler the way _run_steps does, ending a tick per yield."""
+    try:
+        while True:
+            next(steps)
+            for track in script._song.tracks:
+                for clip in track.arrangement_clips:
+                    clip.commit()
+    except StopIteration as done:
+        return done.value
+
+
 def region(script, **params):
     base = {"track_index": 0, "clip_index": 0, "region_start": 66.10, "region_end": 67.04,
             "destination_time": 8.0}
     base.update(params)
-    return script._copy_arrangement_audio_region(base)
+    return drive(script, script._copy_arrangement_audio_region(base))
 
 
 def move(script, **params):
     base = {"track_index": 0, "clip_index": 0, "destination_time": 100.0}
     base.update(params)
-    return script._move_arrangement_clip(base)
+    return drive(script, script._move_arrangement_clip(base))
 
 
 def clip_at(track, start):
@@ -369,7 +364,7 @@ class TestCopyRegion:
                 copy.gain = 0.1
 
         track.mutate_copies = drop_gain
-        with pytest.raises(RuntimeError, match="differs from its source: gain"):
+        with pytest.raises(RuntimeError, match="differs from what was asked: gain"):
             region(make_script(track))
 
     def test_missing_copy_is_reported(self):
@@ -470,14 +465,60 @@ class TestMove:
             move(script, destination_track_index=1)
 
 
+class TestStepRunner:
+    @staticmethod
+    def _steps(fail_at=None):
+        for step in range(2):
+            if step == fail_at:
+                raise ValueError("step {0} failed".format(step))
+            yield
+        return {"ok": True}
+
+    def _run(self, steps):
+        script = make_script()
+        script.schedule_message = MagicMock(side_effect=lambda _delay, fn: fn())
+        replies = []
+        script._run_steps(steps, types.SimpleNamespace(put=replies.append))
+        return script, replies
+
+    def test_each_yield_waits_one_tick_then_replies(self):
+        script, replies = self._run(self._steps())
+        assert replies == [{"status": "success", "result": {"ok": True}}]
+        assert [c.args[0] for c in script.schedule_message.call_args_list] == [1, 1]
+
+    @pytest.mark.parametrize("fail_at", [0, 1])
+    def test_error_in_any_step_is_the_reply(self, fail_at):
+        script, replies = self._run(self._steps(fail_at))
+        assert replies == [{"status": "error", "message": "step {0} failed".format(fail_at)}]
+        script.log_message.assert_called()
+
+    def test_marker_edits_are_committed_before_the_copy_is_made(self):
+        take = unwarped_take()
+        track = Track(clips=[take])
+        script = make_script(track)
+        steps = script._copy_arrangement_audio_region(
+            {"track_index": 0, "clip_index": 0, "region_start": 66.10, "region_end": 67.04,
+             "destination_time": 8.0})
+        # Without a tick between narrowing and duplicating, Live copies the
+        # full-length clip; the handler must notice rather than report success.
+        with pytest.raises(RuntimeError, match="differs from what was asked"):
+            for _ in steps:
+                pass
+
+
 class TestDispatch:
     @pytest.mark.parametrize("command,handler", [
         ("copy_arrangement_audio_region", "_copy_arrangement_audio_region"),
         ("move_arrangement_clip", "_move_arrangement_clip"),
     ])
-    def test_routes_to_handler(self, command, handler):
+    def test_routes_to_stepped_handler(self, command, handler):
+        def steps(params):
+            assert params == {"x": 1}
+            yield
+            return {"ok": True}
+
         script = make_script()
-        setattr(script, handler, MagicMock(return_value={"ok": True}))
+        setattr(script, handler, MagicMock(side_effect=steps))
         script.schedule_message = MagicMock(side_effect=lambda _delay, fn: fn())
         response = script._process_command({"type": command, "params": {"x": 1}})
         assert response == {"status": "success", "result": {"ok": True}}

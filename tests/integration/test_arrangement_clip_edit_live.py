@@ -78,11 +78,12 @@ def take(live):
 
 def test_copy_sub_second_region_unwarped(live, take):
     source = _clip_at(live, take, BASE)
+    destination = source["end_time"] + 8
     result = live.send_command("copy_arrangement_audio_region", {
         "track_index": take, "clip_index": source["index"], "region_start": 0.5,
         "region_end": 1.2, "destination_track_index": take,
-        "destination_time": BASE + 100})
-    copy = _clip_at(live, take, BASE + 100)
+        "destination_time": destination})
+    copy = _clip_at(live, take, destination)
     _, tempo = _clips(live, take)
 
     assert result["file_path"] == source["file_path"] == copy["file_path"]
@@ -96,13 +97,23 @@ def test_copy_sub_second_region_unwarped(live, take):
     assert len([c for c in clips if c["start_time"] >= BASE - TOLERANCE]) == 2
 
 
+def test_copy_onto_its_source_reports_the_overlap(live, take):
+    source = _clip_at(live, take, BASE)
+    result = live.send_command("copy_arrangement_audio_region", {
+        "track_index": take, "clip_index": source["index"], "region_start": 0.5,
+        "region_end": 1.2, "destination_track_index": take,
+        "destination_time": BASE + 8})
+    assert result["overlapped_clips"] == [source["name"]]
+    assert abs(_clip_at(live, take, BASE + 8)["loop_start"] - 0.5) < TOLERANCE
+
+
 def test_move_removes_original_and_keeps_copy(live, take):
     source = _clip_at(live, take, BASE)
     live.send_command("move_arrangement_clip", {
         "track_index": take, "clip_index": source["index"],
-        "destination_track_index": take, "destination_time": BASE + 200})
+        "destination_track_index": take, "destination_time": source["end_time"] + 8})
     assert _clip_at(live, take, BASE) is None
-    moved = _clip_at(live, take, BASE + 200)
+    moved = _clip_at(live, take, source["end_time"] + 8)
     for key in ("file_path", "warping", "loop_start", "loop_end", "name"):
         assert moved[key] == source[key], key
 
