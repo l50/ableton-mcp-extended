@@ -9,10 +9,12 @@ from MCP_Server import connection
 from MCP_Server.conversions import to_zero_based
 from MCP_Server.tools.base import ableton_tool
 
-# Live's fader position for 0 dB, as a normalized 0.0-1.0 volume.
-UNITY_VOLUME = 0.85
-# dB at the top of the fader (volume 1.0).
-MAX_FADER_DB = 6.0
+# Live's fader taper, measured from Live 12's own readout: (normalized volume, dB).
+# Above 0.4 the taper is linear at 40 dB per unit; below it curves down to -inf.
+FADER_TAPER = (
+    (0.05, -57.2), (0.1, -48.6), (0.15, -41.0), (0.2, -34.4), (0.25, -28.8),
+    (0.3, -24.2), (0.35, -20.6), (0.4, -18.0), (1.0, 6.0),
+)
 # Pan values closer to zero than this are reported as "center".
 PAN_CENTER_TOLERANCE = 0.01
 
@@ -21,18 +23,20 @@ def _format_db(volume: float, display: str | None = None) -> str:
     """Return the fader level in dB as Live shows it.
 
     *display* is Live's own readout for the fader (from the Remote Script); it
-    is used verbatim when present. Otherwise fall back to an approximation of
-    Live's fader taper: 0.85 is 0 dB and 1.0 is +6 dB.
+    is used verbatim when present. Otherwise fall back to Live's measured fader
+    taper: 0.85 is 0 dB and 1.0 is +6 dB.
     """
     if display:
         return display.strip()
     if volume <= 0:
         return "-inf dB"
-    if volume >= UNITY_VOLUME:
-        db = (volume - UNITY_VOLUME) / (1.0 - UNITY_VOLUME) * MAX_FADER_DB
-    else:
-        db = 20 * math.log10(volume / UNITY_VOLUME)
-    return f"{db:+.1f} dB"
+    if volume < FADER_TAPER[0][0]:
+        return f"{FADER_TAPER[0][1]:+.1f} dB"
+    volume = min(volume, 1.0)
+    for (v0, db0), (v1, db1) in zip(FADER_TAPER, FADER_TAPER[1:]):
+        if volume <= v1:
+            return f"{db0 + (volume - v0) / (v1 - v0) * (db1 - db0):+.1f} dB"
+    return f"{FADER_TAPER[-1][1]:+.1f} dB"
 
 
 def _format_pan(pan: float) -> str:

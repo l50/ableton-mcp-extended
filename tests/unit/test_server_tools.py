@@ -306,6 +306,13 @@ class TestTrackVolume:
         db = float(re.search(r"≈ ([+-]\d+\.\d) dB", out).group(1))
         assert db == pytest.approx(6.0, abs=0.1)
 
+    @pytest.mark.parametrize("volume,expected", [
+        (0.0, "-inf dB"), (0.1, "-48.6 dB"), (0.25, "-28.8 dB"), (0.5, "-14.0 dB"),
+        (0.7, "-6.0 dB"), (0.85, "+0.0 dB"), (0.9, "+2.0 dB"), (1.0, "+6.0 dB"),
+    ])
+    def test_fallback_matches_lives_fader_readout(self, volume, expected):
+        assert tools.tracks._format_db(volume) == expected
+
     @pytest.mark.parametrize("tool,key,kwargs", [
         (tools.tracks.get_track_volume, "get_track_volume", {}),
         (tools.tracks.set_track_volume, "set_track_volume", {"volume": 0.5}),
