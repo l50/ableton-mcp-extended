@@ -464,6 +464,14 @@ class TestArrangementClips:
         assert result["name"] == "Fresh"
         assert [c.name for c in track.arrangement_clips] == ["Old", "Fresh"]
 
+    def test_create_midi_clip_never_renames_existing_clip_when_no_new_clip(self):
+        old = Clip("Old", 4.0, 12.0)
+        track = Track(arrangement_clips=[old])
+        track.create_midi_clip = MagicMock()
+        result = make_script(Song([track]))._create_arrangement_clip(0, 4.0, 8.0, "Fresh")
+        assert old.name == "Old"
+        assert result["start_time"] == 4.0 and "name" not in result
+
     def test_create_midi_clip_falls_back_when_clip_not_found(self):
         track = Track()
         track.create_midi_clip = MagicMock()

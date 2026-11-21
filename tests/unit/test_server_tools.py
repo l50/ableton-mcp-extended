@@ -313,6 +313,10 @@ class TestTrackVolume:
     def test_fallback_matches_lives_fader_readout(self, volume, expected):
         assert tools.tracks._format_db(volume) == expected
 
+    @pytest.mark.parametrize("volume", [0.01, 0.001, 0.049])
+    def test_fallback_below_measured_taper_reports_upper_bound(self, volume):
+        assert tools.tracks._format_db(volume) == "< -57.2 dB"
+
     @pytest.mark.parametrize("tool,key,kwargs", [
         (tools.tracks.get_track_volume, "get_track_volume", {}),
         (tools.tracks.set_track_volume, "set_track_volume", {"volume": 0.5}),

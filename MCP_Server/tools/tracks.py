@@ -24,14 +24,15 @@ def _format_db(volume: float, display: str | None = None) -> str:
 
     *display* is Live's own readout for the fader (from the Remote Script); it
     is used verbatim when present. Otherwise fall back to Live's measured fader
-    taper: 0.85 is 0 dB and 1.0 is +6 dB.
+    taper: 0.85 is 0 dB and 1.0 is +6 dB. Below the first measured point only an
+    upper bound is reported.
     """
     if display:
         return display.strip()
     if volume <= 0:
         return "-inf dB"
     if volume < FADER_TAPER[0][0]:
-        return f"{FADER_TAPER[0][1]:+.1f} dB"
+        return f"< {FADER_TAPER[0][1]:+.1f} dB"
     volume = min(volume, 1.0)
     for (v0, db0), (v1, db1) in zip(FADER_TAPER, FADER_TAPER[1:]):
         if volume <= v1:

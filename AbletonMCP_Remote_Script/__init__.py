@@ -2176,13 +2176,13 @@ class AbletonMCP(ControlSurface):
             overlapped = self._check_overlap(track, position, length)
             existing = list(track.arrangement_clips)
             track.create_midi_clip(position, length)
-            # Find the newly created clip; prefer one that was not there before so a
-            # clip already starting at this position is never renamed by mistake.
+            # Find the newly created clip; only a clip that was not there before
+            # counts, so a clip already starting at this position is never renamed.
             result = {"start_time": position, "length": length, "is_midi": True}
             matches = [c for c in track.arrangement_clips
                        if abs(c.start_time - position) < 0.01]
             fresh = [c for c in matches if not any(c == old for old in existing)]
-            for clip in (fresh or matches)[:1]:
+            for clip in fresh[:1]:
                 if name:
                     clip.name = name
                 result = self._get_arrangement_clip_info(clip)
