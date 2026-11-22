@@ -31,6 +31,7 @@ MAIN_THREAD_COMMANDS = (
     "create_arrangement_clip", "create_arrangement_audio_clip",
     "duplicate_to_arrangement", "delete_arrangement_clip",
     "set_arrangement_clip_property",
+    "copy_arrangement_audio_region", "move_arrangement_clip",
     "set_view", "control_arrangement_view",
     "manage_clip_automation",
     "add_notes_to_arrangement_clip",
@@ -41,6 +42,18 @@ MAIN_THREAD_COMMANDS = (
     "set_track_mute", "set_track_solo", "set_track_arm",
     "set_track_input", "set_track_monitoring", "set_tracks_state",
 )
+
+# Audio clip settings a copy or move must carry over from its source.
+AUDIO_CLIP_PROPERTIES = ("file_path", "warping", "warp_mode", "gain",
+                         "pitch_coarse", "pitch_fine")
+# Beats or seconds: below this, two clip times count as equal.
+CLIP_TIME_TOLERANCE = 1e-3
+# Room left between the last clip on a track and a temporary staged copy.
+STAGING_GAP_BEATS = 16.0
+# Live's arrangement range, in beats (Track.create_midi_clip's documented limit).
+MAX_ARRANGEMENT_TIME = 1576800.0
+# Live's fastest tempo; it bounds how many beats an unwarped region can span.
+MAX_TEMPO_BPM = 999.0
 
 def create_instance(c_instance):
     """Create and return the AbletonMCP script instance"""
@@ -355,6 +368,14 @@ class AbletonMCP(ControlSurface):
                             prop = params.get("property", "")
                             val = params.get("value", None)
                             result = self._set_arrangement_clip_property(ti, ci, prop, val, cn)
+                        elif command_type == "copy_arrangement_audio_region":
+                            self._run_steps(self._copy_arrangement_audio_region(params),
+                                            response_queue)
+                            return
+                        elif command_type == "move_arrangement_clip":
+                            self._run_steps(self._move_arrangement_clip(params),
+                                            response_queue)
+                            return
                         elif command_type == "set_view":
                             vn = params.get("view_name", "Arranger")
                             result = self._set_view(vn)
@@ -506,7 +527,7 @@ class AbletonMCP(ControlSurface):
     def _get_arrangement_clip_info(self, clip):
         """Serialize a Clip object to ArrangementClipInfo dict."""
         try:
-            return {
+            info = {
                 "name": clip.name,
                 "start_time": clip.start_time,
                 "end_time": clip.end_time,
@@ -519,6 +540,10 @@ class AbletonMCP(ControlSurface):
                 "loop_start": clip.loop_start,
                 "loop_end": clip.loop_end,
             }
+            if clip.is_audio_clip:
+                info["file_path"] = clip.file_path
+                info["warping"] = clip.warping
+            return info
         except Exception as e:
             self.log_message("Error getting arrangement clip info: " + str(e))
             return {"name": "unknown", "error": str(e)}
@@ -2247,6 +2272,341 @@ class AbletonMCP(ControlSurface):
             return {"deleted": True}
         except Exception as e:
             self.log_message("Error deleting arrangement clip: " + str(e))
+            raise
+
+    # Arrangement clip copy and move.
+    #
+    # Live's API cannot move an arrangement clip or copy part of one: start_time
+    # is read-only. Track.duplicate_clip_to_arrangement does accept an
+    # arrangement clip and writes a full copy that keeps the source's audio
+    # file, warp state, warp markers, gain and pitch, and the copy's markers can
+    # then be narrowed. A duplicate overwrites whatever it lands on, so anything
+    # that is not yet the final clip is staged past the end of the track, where
+    # nothing can be overwritten, and deleted afterwards.
+
+    def _run_steps(self, steps, response_queue):
+        """Run a stepped handler, one Live main-thread tick per step.
+
+        Live applies clip edits such as new markers only when the current
+        tick ends: until then end_time keeps its old value and a duplicate
+        copies the clip as it was. A stepped handler is a generator that
+        yields wherever it needs Live to commit what it has done so far; it
+        resumes on the next tick, and its return value is the reply.
+        """
+        try:
+            next(steps)
+        except StopIteration as done:
+            response_queue.put({"status": "success", "result": done.value})
+            return
+        except Exception as e:
+            self.log_message("Error in main thread task: " + str(e))
+            self.log_message(traceback.format_exc())
+            response_queue.put({"status": "error", "message": str(e)})
+            return
+        self.schedule_message(1, lambda: self._run_steps(steps, response_queue))
+
+    def _clip_snapshot(self, clip):
+        """The clip settings a copy or move must carry over unchanged."""
+        snap = {
+            "name": clip.name,
+            "is_audio": bool(clip.is_audio_clip),
+            "length": clip.end_time - clip.start_time,
+            "muted": clip.muted,
+            "color": clip.color,
+            "looping": clip.looping,
+            "loop_start": clip.loop_start,
+            "loop_end": clip.loop_end,
+            "start_marker": clip.start_marker,
+            "end_marker": clip.end_marker,
+        }
+        if snap["is_audio"]:
+            for prop in AUDIO_CLIP_PROPERTIES:
+                snap[prop] = getattr(clip, prop)
+        return snap
+
+    @staticmethod
+    def _snapshot_mismatches(expected, actual, keys):
+        """Keys whose values differ between two clip snapshots."""
+        mismatches = []
+        for key in keys:
+            want, got = expected.get(key), actual.get(key)
+            if isinstance(want, float) or isinstance(got, float):
+                if want is None or got is None or abs(want - got) > CLIP_TIME_TOLERANCE:
+                    mismatches.append("{0}: expected {1}, got {2}".format(key, want, got))
+            elif want != got:
+                mismatches.append("{0}: expected {1}, got {2}".format(key, want, got))
+        return mismatches
+
+    def _audio_clip_info(self, clip):
+        """Arrangement clip info plus the audio settings a copy carries over."""
+        info = self._get_arrangement_clip_info(clip)
+        info["start_marker"] = clip.start_marker
+        info["end_marker"] = clip.end_marker
+        if clip.is_audio_clip:
+            for prop in AUDIO_CLIP_PROPERTIES:
+                info[prop] = getattr(clip, prop)
+        return info
+
+    def _staging_time(self, track, reserved_end):
+        """An arrangement time on *track* where a temporary clip overwrites nothing.
+
+        It lies past every clip on the track and past *reserved_end*, the end
+        of the range the final clip will occupy.
+        """
+        end = reserved_end
+        for clip in track.arrangement_clips:
+            end = max(end, clip.end_time)
+        return end + STAGING_GAP_BEATS
+
+    @staticmethod
+    def _check_arrangement_range(destination_time, length):
+        """Refuse a clip that would not fit inside Live's arrangement range."""
+        if destination_time < 0 or destination_time + length > MAX_ARRANGEMENT_TIME:
+            raise ValueError("Arrangement time {0} is outside Live's range (0-{1} beats)".format(
+                destination_time, MAX_ARRANGEMENT_TIME))
+
+    @staticmethod
+    def _length_comparable(snapshot):
+        """Whether a clip's length in beats is the same wherever it is placed.
+
+        An unwarped audio clip plays in seconds, so its length in beats follows
+        the tempo at its position; its file-seconds markers prove its content.
+        """
+        return not snapshot["is_audio"] or bool(snapshot["warping"])
+
+    @staticmethod
+    def _reserved_length(clip):
+        """The most beats *clip* can span wherever on the arrangement it is placed.
+
+        An unwarped audio clip plays its markers' seconds of the file, so its
+        length in beats is bounded by Live's fastest tempo.
+        """
+        length = clip.end_time - clip.start_time
+        if clip.is_audio_clip and not clip.warping:
+            length = max(length, (clip.end_marker - clip.start_marker) * MAX_TEMPO_BPM / 60.0)
+        return length
+
+    def _duplicate_arrangement_clip(self, track, clip, destination_time, length):
+        """Duplicate *clip* onto *track* at *destination_time*.
+
+        Returns the copy and the names of the other clips it landed on, judged
+        by where they were before the copy cut into them.
+        """
+        self._check_arrangement_range(destination_time, length)
+        before = [(old, old.name, old.start_time, old.end_time)
+                  for old in track.arrangement_clips]
+        track.duplicate_clip_to_arrangement(clip, destination_time)
+        for candidate in track.arrangement_clips:
+            if abs(candidate.start_time - destination_time) <= CLIP_TIME_TOLERANCE and \
+                    not any(candidate == old for old, _, _, _ in before):
+                overlapped = [
+                    name or "(unnamed)" for old, name, start, end in before
+                    if old != clip and start < candidate.end_time - CLIP_TIME_TOLERANCE and
+                    end > candidate.start_time + CLIP_TIME_TOLERANCE]
+                return candidate, overlapped
+        raise RuntimeError("Live did not create the copy at beat {0} on track '{1}'".format(
+            destination_time, track.name))
+
+    @staticmethod
+    def _seconds_to_clip_time(clip, seconds):
+        """Convert a time in the clip's audio file to the clip's own time unit.
+
+        Unwarped clips already count in seconds of the file. Warped clips count
+        in beats, mapped from the file through the warp markers; outside the
+        first and last marker the nearest segment's tempo is extended.
+        """
+        if not clip.warping:
+            return seconds
+        points = []
+        for marker in clip.warp_markers:
+            if isinstance(marker, dict):
+                points.append((marker["sample_time"], marker["beat_time"]))
+            else:
+                points.append((marker.sample_time, marker.beat_time))
+        points.sort()
+        if len(points) < 2:
+            raise ValueError("Clip '{0}' is warped but has fewer than two warp markers; "
+                             "cannot map seconds to beats".format(clip.name))
+        index = 0
+        while index < len(points) - 2 and seconds > points[index + 1][0]:
+            index += 1
+        (s0, b0), (s1, b1) = points[index], points[index + 1]
+        return b0 + (seconds - s0) * (b1 - b0) / (s1 - s0)
+
+    @staticmethod
+    def _set_clip_window(clip, start, end):
+        """Narrow an unlooped clip to [start, end) in the clip's time unit.
+
+        Each bound is set in an order that never puts the start after the end,
+        which Live refuses.
+        """
+        if start >= clip.loop_end:
+            clip.loop_end = end
+            clip.loop_start = start
+        else:
+            clip.loop_start = start
+            clip.loop_end = end
+        if start >= clip.end_marker:
+            clip.end_marker = end
+            clip.start_marker = start
+        else:
+            clip.start_marker = start
+            clip.end_marker = end
+
+    def _copy_arrangement_audio_region(self, params):
+        """Copy part of an arrangement audio clip, by seconds of its file, to a new spot.
+
+        A stepped handler (see _run_steps). The copy references the source
+        clip's own audio file; nothing is rendered. It keeps the source's warp
+        state, warp mode, warp markers, gain and pitch, so an unwarped source
+        still plays at its original speed.
+        """
+        try:
+            track, src = self._resolve_arrangement_clip(
+                params.get("track_index", 0), params.get("clip_index"), params.get("clip_name"))
+            if not src.is_audio_clip:
+                raise ValueError("Clip '{0}' is a MIDI clip; region copy needs an audio "
+                                 "clip".format(src.name))
+            region_start = float(params.get("region_start", 0.0))
+            region_end = float(params.get("region_end", 0.0))
+            duration = float(src.sample_length) / float(src.sample_rate)
+            if region_start < 0 or region_end <= region_start or \
+                    region_end > duration + CLIP_TIME_TOLERANCE:
+                raise ValueError(
+                    "Region {0}-{1}s is not inside the clip's audio file (0-{2:.3f}s)".format(
+                        region_start, region_end, duration))
+            destination_time = float(params.get("destination_time", 0.0))
+
+            source = self._clip_snapshot(src)
+            window_start = self._seconds_to_clip_time(src, region_start)
+            window_end = self._seconds_to_clip_time(src, region_end)
+            if src.warping:
+                reserved = window_end - window_start
+            else:
+                # Unwarped length in beats follows the tempo; bound it by Live's
+                # fastest tempo so the staged clip can never be overwritten.
+                reserved = (region_end - region_start) * MAX_TEMPO_BPM / 60.0
+            self._check_arrangement_range(destination_time, reserved)
+            source_length = src.end_time - src.start_time
+            staging = self._staging_time(track, destination_time + reserved)
+            staged, _ = self._duplicate_arrangement_clip(
+                track, src, staging, max(source_length, reserved))
+            yield
+            try:
+                if staged.looping:
+                    staged.looping = False
+                    yield
+                self._set_clip_window(staged, window_start, window_end)
+                yield
+                trimmed = self._clip_snapshot(staged)
+                expected = {"loop_start": window_start, "loop_end": window_end,
+                            "start_marker": window_start, "end_marker": window_end}
+                if src.warping:
+                    expected["length"] = window_end - window_start
+                wrong = self._snapshot_mismatches(expected, trimmed, sorted(expected))
+                if wrong:
+                    raise RuntimeError("Live did not narrow the copy to the region: " +
+                                       "; ".join(wrong))
+                copy, overlapped = self._duplicate_arrangement_clip(
+                    track, staged, destination_time, reserved)
+                yield
+            finally:
+                track.delete_clip(staged)
+
+            final = self._clip_snapshot(copy)
+            keys = ["loop_start", "loop_end", "start_marker", "end_marker", "looping"]
+            if self._length_comparable(source):
+                keys.append("length")
+            wrong = self._snapshot_mismatches(source, final, AUDIO_CLIP_PROPERTIES) + \
+                self._snapshot_mismatches(trimmed, final, keys)
+            if wrong:
+                track.delete_clip(copy)
+                raise RuntimeError("The copy at beat {0} differs from what was asked, so it was "
+                                   "removed: {1}".format(destination_time, "; ".join(wrong)))
+            result = self._audio_clip_info(copy)
+            result.update({
+                "source_clip": src.name,
+                "track": track.name,
+                "region_start": region_start,
+                "region_end": region_end,
+                "overlapped_clips": overlapped,
+            })
+            return result
+        except Exception as e:
+            self.log_message("Error copying arrangement audio region: " + str(e))
+            raise
+
+    def _verified_duplicate(self, track, clip, expected, destination_time, length):
+        """Duplicate *clip* and check the copy matches *expected*; drop it if not.
+
+        A step generator for use with ``yield from``; returns the copy and the
+        clips it landed on.
+        """
+        copy, overlapped = self._duplicate_arrangement_clip(
+            track, clip, destination_time, length)
+        yield
+        keys = sorted(key for key in expected
+                      if key != "length" or self._length_comparable(expected))
+        wrong = self._snapshot_mismatches(expected, self._clip_snapshot(copy), keys)
+        if wrong:
+            track.delete_clip(copy)
+            raise RuntimeError("The copy at beat {0} did not match the original, so it was "
+                               "removed: {1}".format(destination_time, "; ".join(wrong)))
+        return copy, overlapped
+
+    def _move_arrangement_clip(self, params):
+        """Move an arrangement clip: copy it, verify the copy, then delete the original.
+
+        A stepped handler (see _run_steps). When the new spot overlaps the clip
+        itself, the copy is first staged past the end of the
+        track, so the original is never overwritten while it is still the only
+        intact version.
+        """
+        try:
+            track, src = self._resolve_arrangement_clip(
+                params.get("track_index", 0), params.get("clip_index"), params.get("clip_name"))
+            destination_time = float(params.get("destination_time", 0.0))
+            source = self._clip_snapshot(src)
+            reserved = self._reserved_length(src)
+            original_start = src.start_time
+            if abs(destination_time - original_start) <= CLIP_TIME_TOLERANCE:
+                raise ValueError("Clip '{0}' is already at beat {1}".format(
+                    src.name, destination_time))
+            self._check_arrangement_range(destination_time, reserved)
+            overlaps_itself = destination_time < src.end_time and \
+                destination_time + reserved > original_start
+
+            staged_at = None
+            if overlaps_itself:
+                staged_at = self._staging_time(track, destination_time + reserved)
+                staged, _ = yield from self._verified_duplicate(
+                    track, src, source, staged_at, reserved)
+                track.delete_clip(src)
+                yield
+                try:
+                    moved, overlapped = yield from self._verified_duplicate(
+                        track, staged, source, destination_time, reserved)
+                except Exception as e:
+                    raise RuntimeError("{0}. The original was already replaced by an intact "
+                                       "copy at beat {1} on track '{2}', which was kept".format(
+                                           e, staged_at, track.name))
+                track.delete_clip(staged)
+            else:
+                moved, overlapped = yield from self._verified_duplicate(
+                    track, src, source, destination_time, reserved)
+                track.delete_clip(src)
+            yield
+
+            result = self._audio_clip_info(moved)
+            result.update({
+                "track": track.name,
+                "moved_from": original_start,
+                "staged_at": staged_at,
+                "overlapped_clips": overlapped,
+            })
+            return result
+        except Exception as e:
+            self.log_message("Error moving arrangement clip: " + str(e))
             raise
 
     def _set_arrangement_clip_property(self, track_index, clip_index, property_name, value,

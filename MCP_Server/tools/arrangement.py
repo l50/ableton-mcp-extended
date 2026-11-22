@@ -44,6 +44,19 @@ def _bar_range(start: float, end: float, num: int, denom: int) -> str:
     return f"{beat_to_bar(start, num, denom)}-{beat_to_bar(end, num, denom)}"
 
 
+def _audio_source(clip: dict) -> str:
+    """The audio file an arrangement clip plays and, if unwarped, which seconds of it."""
+    if not clip.get("file_path"):
+        return ""
+    file_name = clip["file_path"].rsplit("/", 1)[-1]
+    if clip.get("warping"):
+        return f" [{file_name}, warped]"
+    return (
+        f" [{file_name}, unwarped, file {clip.get('loop_start', 0):.3f}-"
+        f"{clip.get('loop_end', 0):.3f}s]"
+    )
+
+
 @ableton_tool("getting arrangement info")
 def get_arrangement_info(ctx: Context, track_index: int = 0) -> str:
     """Get arrangement clips and transport state.
@@ -84,6 +97,7 @@ def get_arrangement_info(ctx: Context, track_index: int = 0) -> str:
             muted = " [MUTED]" if clip.get("muted") else ""
             lines.append(
                 f'  {clip.get("index", 0) + 1}. "{clip.get("name", "")}" bars {bars}{muted}'
+                f"{_audio_source(clip)}"
             )
 
     return "\n".join(lines)
@@ -331,6 +345,115 @@ def delete_arrangement_clip(
     ableton.send_command("delete_arrangement_clip", params)
     ref = f"'{clip_name}'" if clip_name else f"#{clip_index}"
     return f"Deleted arrangement clip {ref} on track {track_index}" + ARRANGEMENT_TIP
+
+
+def _overlap_warning(result: dict) -> str:
+    overlapped = result.get("overlapped_clips", [])
+    if not overlapped:
+        return ""
+    return (
+        f"\nWarning: overlapped existing clips: {', '.join(overlapped)}"
+        " (as with pasting, Live cuts out the part the new clip covers: a clip it lands"
+        " inside is split around it)"
+    )
+
+
+def _audio_settings(result: dict) -> str:
+    if not result.get("is_audio"):
+        return ""
+    warp = "warped" if result.get("warping") else "unwarped (plays at original speed)"
+    return (
+        f"\nAudio: {result.get('file_path')} | {warp} | gain {result.get('gain')} | "
+        f"pitch {result.get('pitch_coarse')} st {result.get('pitch_fine')} ct"
+    )
+
+
+@ableton_tool("copying arrangement clip region")
+def copy_arrangement_clip_region(
+    ctx: Context,
+    track_index: int,
+    region_start_seconds: float,
+    region_end_seconds: float,
+    clip_index: int = 0,
+    clip_name: str = "",
+    destination_bar: int = 0,
+    destination_beat: float = 0.0,
+) -> str:
+    """Copy part of an arrangement audio clip to a new position on the same track.
+
+    The copy plays the source clip's own audio file (no new file is rendered)
+    and keeps the source's name, warping, warp mode, gain and pitch, so an
+    unwarped source still plays at its original speed.
+
+    Parameters:
+    - track_index: Track holding the source clip (1-based).
+    - region_start_seconds: Region start, in seconds of the clip's audio file
+      (0 = the file's first sample, not the clip's left edge).
+    - region_end_seconds: Region end, in seconds of the clip's audio file.
+    - clip_index: Source clip position in the arrangement (1-based).
+    - clip_name: Source clip name (alternative to clip_index).
+    - destination_bar: Destination bar (1-based). Takes precedence over destination_beat.
+    - destination_beat: Destination position in beats (0-based).
+    """
+    ableton = connection.get_ableton_connection()
+    params = {
+        "track_index": to_zero_based(track_index, "track_index"),
+        **arrangement_clip_target(clip_index, clip_name),
+        "destination_time": _convert_bar_to_beat(destination_bar, destination_beat),
+        "region_start": region_start_seconds,
+        "region_end": region_end_seconds,
+    }
+    result = ableton.send_command("copy_arrangement_audio_region", params)
+    num, denom = _get_time_signature()
+    start = result.get("start_time", params["destination_time"])
+    msg = (
+        f"Copied {region_start_seconds}-{region_end_seconds}s of "
+        f"'{result.get('source_clip', clip_name)}' on '{result.get('track')}' "
+        f"to bar {beat_to_bar(start, num, denom)} (beat {start}), "
+        f"length {result.get('length')} beats"
+    )
+    return msg + _audio_settings(result) + _overlap_warning(result) + ARRANGEMENT_TIP
+
+
+@ableton_tool("moving arrangement clip")
+def move_arrangement_clip(
+    ctx: Context,
+    track_index: int,
+    clip_index: int = 0,
+    clip_name: str = "",
+    destination_bar: int = 0,
+    destination_beat: float = 0.0,
+) -> str:
+    """Move an arrangement clip to a new position on the same track.
+
+    Live has no move call, so the clip is duplicated to the new position, the
+    copy is checked against the original (audio file, markers, warping, gain,
+    pitch, and length unless it is unwarped audio), and only then is the
+    original deleted.
+
+    Parameters:
+    - track_index: Track holding the clip (1-based).
+    - clip_index: Clip position in the arrangement (1-based).
+    - clip_name: Clip name (alternative to clip_index).
+    - destination_bar: Destination bar (1-based). Takes precedence over destination_beat.
+    - destination_beat: Destination position in beats (0-based).
+    """
+    ableton = connection.get_ableton_connection()
+    params = {
+        "track_index": to_zero_based(track_index, "track_index"),
+        **arrangement_clip_target(clip_index, clip_name),
+        "destination_time": _convert_bar_to_beat(destination_bar, destination_beat),
+    }
+    result = ableton.send_command("move_arrangement_clip", params)
+    num, denom = _get_time_signature()
+    start = result.get("start_time", params["destination_time"])
+    old = result.get("moved_from", 0)
+    msg = (
+        f"Moved '{result.get('name') or '(unnamed)'}' on '{result.get('track')}' from bar "
+        f"{beat_to_bar(old, num, denom)} (beat {old}) to "
+        f"bar {beat_to_bar(start, num, denom)} (beat {start})"
+    )
+    return msg + _audio_settings(result) + _overlap_warning(result) + ARRANGEMENT_TIP
 
 
 @ableton_tool("setting arrangement clip property")
