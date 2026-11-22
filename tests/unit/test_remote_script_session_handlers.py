@@ -254,9 +254,6 @@ class TestSessionAndTracks:
         assert info["devices"] == [{"index": 0, "name": "EQ Eight", "class_name": "Eq8",
                                     "type": ANY}]
 
-    @pytest.mark.xfail(strict=False, reason=(
-        "Bug: _get_device_type only matches the literal 'audio_effect' in class_name, "
-        "so ordinary audio effects such as EQ Eight (Eq8) are typed 'unknown'"))
     def test_track_info_types_audio_effects(self):
         info = make_script(Song([Track("Keys", devices=[Device()])]))._get_track_info(0)
         assert info["devices"][0]["type"] == "audio_effect"
@@ -301,6 +298,14 @@ class TestMixer:
         result = make_script(song)._set_track_volume(0, requested)
         assert result == {"track_name": "Drums", "volume": stored}
         assert song.tracks[0].mixer_device.volume.value == stored
+
+    def test_volume_includes_lives_own_display_when_available(self):
+        song = self._song()
+        vol = song.tracks[0].mixer_device.volume
+        vol.str_for_value = lambda value: "{0:.1f} dB".format(6.0 * value)
+        vol.value = 1.0
+        assert make_script(song)._get_track_volume(0)["volume_display"] == "6.0 dB"
+        assert make_script(song)._set_track_volume(0, 1.0)["volume_display"] == "6.0 dB"
 
     @pytest.mark.parametrize("requested,stored", [(-0.25, -0.25), (3.0, 1.0), (-3.0, -1.0)])
     def test_set_panning_clamps(self, requested, stored):
@@ -441,6 +446,33 @@ class TestArrangementClips:
         assert result["name"] == "MIDI"
         assert result["start_time"] == 4.0
         assert result["overlapped_clips"] == ["Old"]
+
+    def test_create_midi_clip_applies_name(self):
+        track = Track()
+        result = make_script(Song([track]))._create_arrangement_clip(0, 4.0, 8.0, "Verse")
+        assert result["name"] == "Verse"
+        assert track.arrangement_clips[0].name == "Verse"
+
+    def test_create_midi_clip_without_name_keeps_default(self):
+        track = Track()
+        result = make_script(Song([track]))._create_arrangement_clip(0, 4.0, 8.0, "")
+        assert result["name"] == "MIDI"
+
+    def test_create_midi_clip_names_new_clip_not_existing_one_at_same_start(self):
+        old = Clip("Old", 4.0, 12.0)
+        track = Track(arrangement_clips=[old])
+        result = make_script(Song([track]))._create_arrangement_clip(0, 4.0, 8.0, "Fresh")
+        assert old.name == "Old"
+        assert result["name"] == "Fresh"
+        assert [c.name for c in track.arrangement_clips] == ["Old", "Fresh"]
+
+    def test_create_midi_clip_never_renames_existing_clip_when_no_new_clip(self):
+        old = Clip("Old", 4.0, 12.0)
+        track = Track(arrangement_clips=[old])
+        track.create_midi_clip = MagicMock()
+        result = make_script(Song([track]))._create_arrangement_clip(0, 4.0, 8.0, "Fresh")
+        assert old.name == "Old"
+        assert result["start_time"] == 4.0 and "name" not in result
 
     def test_create_midi_clip_falls_back_when_clip_not_found(self):
         track = Track()

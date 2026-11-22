@@ -26,10 +26,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from AbletonMCP_Remote_Script import AbletonMCP  # noqa: E402
 
-AUDIO_EFFECT_TYPE_BUG = (
-    "Bug: _get_device_type only matches the literal 'audio_effect' in class_name, "
-    "so ordinary audio effects such as Chorus and EQ Eight (Eq8) are typed 'unknown'")
-
 # ── stubs ────────────────────────────────────────────────────────────
 
 
@@ -189,7 +185,6 @@ class TestDeviceDescriptors:
     def test_device_type(self, device, expected):
         assert make_script()._get_device_type(device) == expected
 
-    @pytest.mark.xfail(strict=False, reason=AUDIO_EFFECT_TYPE_BUG)
     @pytest.mark.parametrize("device", [
         Device("Chorus", "AudioEffectChorus", "Chorus", device_type=2),
         Device("EQ Eight", "Eq8", "EQ Eight", device_type=2),
@@ -346,7 +341,6 @@ class TestChainInfo:
                                         "class_name": "AudioEffectChorus", "type": ANY,
                                         "is_active": False, "parameter_count": 1}
 
-    @pytest.mark.xfail(strict=False, reason=AUDIO_EFFECT_TYPE_BUG)
     def test_chain_types_audio_effects(self):
         script = make_script([Track("T", [self._rack()])])
         assert script._get_chain_info(0, 0)["chains"][0]["devices"][1]["type"] == "audio_effect"

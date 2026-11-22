@@ -345,7 +345,8 @@ class AbletonMCP(ControlSurface):
                             ti = params.get("track_index", 0)
                             pos = params.get("position", 0.0)
                             length = params.get("length", 4.0)
-                            result = self._create_arrangement_clip(ti, pos, length)
+                            clip_name = params.get("name", "")
+                            result = self._create_arrangement_clip(ti, pos, length, clip_name)
                         elif command_type == "create_arrangement_audio_clip":
                             ti = params.get("track_index", 0)
                             pos = params.get("position", 0.0)
@@ -768,7 +769,7 @@ class AbletonMCP(ControlSurface):
             track = all_tracks[track_index]
             vol_param = track.mixer_device.volume
             pan_param = track.mixer_device.panning
-            return {
+            result = {
                 "track_name": track.name,
                 "volume": vol_param.value,
                 "volume_min": vol_param.min,
@@ -777,9 +778,18 @@ class AbletonMCP(ControlSurface):
                 "panning_min": pan_param.min,
                 "panning_max": pan_param.max,
             }
+            self._add_volume_display(result, vol_param)
+            return result
         except Exception as e:
             self.log_message("Error getting track volume: " + str(e))
             raise
+
+    def _add_volume_display(self, result, vol_param):
+        """Add Live's own fader readout (e.g. "-6.0 dB") to *result* when available."""
+        try:
+            result["volume_display"] = str(vol_param.str_for_value(vol_param.value))
+        except Exception:
+            pass
 
     def _set_track_volume(self, track_index, volume):
         """Set the mixer fader volume for a track.
@@ -798,10 +808,12 @@ class AbletonMCP(ControlSurface):
             # Clamp to valid range
             clamped = max(vol_param.min, min(vol_param.max, float(volume)))
             vol_param.value = clamped
-            return {
+            result = {
                 "track_name": track.name,
                 "volume": vol_param.value,
             }
+            self._add_volume_display(result, vol_param)
+            return result
         except Exception as e:
             self.log_message("Error setting track volume: " + str(e))
             raise
@@ -2179,21 +2191,26 @@ class AbletonMCP(ControlSurface):
         if track == self._song.master_track:
             raise ValueError("Cannot create arrangement clips on master track")
 
-    def _create_arrangement_clip(self, track_index, position, length):
-        """Create MIDI clip in arrangement."""
+    def _create_arrangement_clip(self, track_index, position, length, name=""):
+        """Create MIDI clip in arrangement, optionally naming it."""
         try:
             if track_index < 0 or track_index >= len(self._song.tracks):
                 raise IndexError("Track index out of range")
             self._validate_not_return_or_master(track_index)
             track = self._song.tracks[track_index]
             overlapped = self._check_overlap(track, position, length)
+            existing = list(track.arrangement_clips)
             track.create_midi_clip(position, length)
-            # Find the newly created clip
+            # Find the newly created clip; only a clip that was not there before
+            # counts, so a clip already starting at this position is never renamed.
             result = {"start_time": position, "length": length, "is_midi": True}
-            for clip in track.arrangement_clips:
-                if abs(clip.start_time - position) < 0.01:
-                    result = self._get_arrangement_clip_info(clip)
-                    break
+            matches = [c for c in track.arrangement_clips
+                       if abs(c.start_time - position) < 0.01]
+            fresh = [c for c in matches if not any(c == old for old in existing)]
+            for clip in fresh[:1]:
+                if name:
+                    clip.name = name
+                result = self._get_arrangement_clip_info(clip)
             result["overlapped_clips"] = overlapped
             return result
         except Exception as e:
@@ -3137,6 +3154,13 @@ class AbletonMCP(ControlSurface):
             elif "audio_effect" in device.class_name.lower():
                 return "audio_effect"
             elif "midi_effect" in device.class_name.lower():
+                return "midi_effect"
+            # Live's Device.type: 1 = instrument, 2 = audio effect, 4 = MIDI effect
+            # (the Live API's Device.type enum).
+            device_type = getattr(device, "type", None)
+            if device_type == 2:
+                return "audio_effect"
+            elif device_type == 4:
                 return "midi_effect"
             else:
                 return "unknown"
