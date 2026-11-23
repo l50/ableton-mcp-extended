@@ -1108,6 +1108,21 @@ class TestPendingExport:
         done = exporter.run(request(tmp_path, name="done.wav"))
         assert done["ok"] is True, done
 
+    @pytest.mark.parametrize("change", ["save_as", "plugin_window"])
+    def test_windows_an_export_cannot_leave_do_not_hold_a_pending_export(
+            self, tmp_path, clock, change):
+        live, exporter = make(clock, window_stays=True)
+        assert exporter.run(request(tmp_path, render_timeout=6))["export_pending"] is True
+        live._rendering = None
+        live.windows = [w for w in live.windows if w["name"] != ""]
+        live.b["window_stays"] = False
+        if change == "save_as":
+            next(w for w in live.windows if w["name"] == "My Song")["name"] = "My Song v20"
+        else:
+            live.open_window("Pro-Q 3/1-Bass", subrole="AXStandardWindow")
+        done = exporter.run(request(tmp_path, name="done.wav"))
+        assert done["ok"] is True, done
+
     def test_failure_before_the_dialog_opens_is_not_pending(self, tmp_path, clock):
         live, exporter = make(clock, export_menu="disabled")
         result = exporter.run(request(tmp_path))

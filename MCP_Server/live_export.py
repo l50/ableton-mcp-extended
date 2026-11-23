@@ -925,7 +925,7 @@ class LiveExporter:
         global _pending_baseline
         if _pending_baseline is not None:
             still_open = self._settle(_pending_baseline,
-                                      STABLE_POLLS * min(0.25, self.poll_interval), cancel=False)
+                                      STABLE_POLLS * min(0.25, self.poll_interval), earlier=True)
             if still_open != []:
                 raise ExportError(
                     "an earlier export did not finish cleanly and may still be running in "
@@ -961,11 +961,14 @@ class LiveExporter:
         return []
 
     def _settle(
-        self, baseline: Sequence[str], timeout: float, cancel: bool = True
+        self, baseline: Sequence[str], timeout: float, earlier: bool = False
     ) -> Optional[List[str]]:
         """Cancel the export windows and wait until Live shows none it opened.
 
-        With cancel False nothing is cancelled; it only waits.
+        With earlier True (an export an earlier call left pending) nothing is
+        cancelled, and only windows an export leaves behind count: the Export
+        dialog, the Save panel and untitled (render progress) windows beyond
+        the baseline's, so a renamed Set or a plugin window does not.
 
         Returns [] once STABLE_POLLS polls in a row show no window that was
         not open at baseline (no Export dialog, Save panel or render window).
@@ -973,7 +976,7 @@ class LiveExporter:
         timeout ends before Live has shown clear long enough), or None when
         that cannot be told.
         """
-        if cancel:
+        if not earlier:
             self._cancel(SAVE_PANEL_TITLE)
             self._cancel(EXPORT_DIALOG_TITLE)
         deadline = self.clock.monotonic() + timeout
@@ -988,6 +991,8 @@ class LiveExporter:
                 if not status.get("running"):
                     return []
                 extra = _extra_windows(status, baseline)
+                if earlier:
+                    extra = [n for n in extra if n in (EXPORT_DIALOG_TITLE, SAVE_PANEL_TITLE, "")]
             clear = clear + 1 if extra == [] else 0
             if clear >= STABLE_POLLS:
                 return []
@@ -996,7 +1001,7 @@ class LiveExporter:
             if self.clock.monotonic() >= deadline:
                 return last_open if extra == [] else extra
             for name in (SAVE_PANEL_TITLE, EXPORT_DIALOG_TITLE):
-                if cancel and extra and name in extra:
+                if not earlier and extra and name in extra:
                     self._cancel(name)
             self.clock.sleep(min(0.25, self.poll_interval))
 
