@@ -60,11 +60,17 @@ def run(tmp_path, monkeypatch):
     """Call an export tool on macOS with a fake Ableton and a stubbed exporter."""
     monkeypatch.setattr(sys, "platform", "darwin")
 
-    def _run(tool, fake=None, export_result=None, export_error=None, **kwargs):
+    def _run(tool, fake=None, export_result=None, export_error=None, preflight_error=None, **kwargs):
         fake = fake or FakeAbleton({"get_arrangement_info": ARRANGEMENT})
         seen = {}
+        exporter = MagicMock()
+        if preflight_error:
+            exporter.preflight.side_effect = preflight_error
+        else:
+            exporter.preflight.return_value = []
 
-        def fake_export(request):
+        def fake_export(request, given_exporter=None):
+            seen["exporter"] = given_exporter
             seen["request"] = request
             seen["calls_at_export"] = list(fake.calls)
             if export_error:
@@ -74,8 +80,10 @@ def run(tmp_path, monkeypatch):
 
         kwargs.setdefault("output_path", str(tmp_path / "mix.wav"))
         with patch.object(connection, "get_ableton_connection", return_value=fake), \
+                patch.object(live_export, "LiveExporter", return_value=exporter), \
                 patch.object(live_export, "export_from_live", side_effect=fake_export):
             out = json.loads(tool(CTX, **kwargs))
+        seen["preflight_calls"] = exporter.preflight.call_count
         return out, fake, seen
 
     return _run
@@ -240,7 +248,122 @@ def test_loop_restore_failure_is_a_warning(run):
     assert out["warnings"] == ["could not restore the loop brace: socket closed"]
 
 
+def test_preflight_runs_before_the_loop_is_touched_and_the_exporter_is_reused(run):
+    out, fake, seen = run(tools.export.export_audio)
+    assert out["ok"] is True
+    assert seen["preflight_calls"] == 1
+    assert seen["exporter"] is not None
+
+
+@pytest.mark.parametrize("render_range", ["arrangement", "loop", "selection"])
+def test_missing_audio_interface_stops_before_touching_the_set(run, render_range):
+    error = live_export.ExportError("Live has no audio output device (its log reports "
+                                    "'Output Device: No Device')")
+    out, fake, seen = run(tools.export.export_audio, render_range=render_range, preflight_error=error)
+    assert out["ok"] is False
+    assert "Live has no audio output device" in out["error"]
+    assert out["export_pending"] is False
+    assert fake.calls == [] and "request" not in seen
+
+
+def test_pending_export_leaves_the_loop_brace_where_the_render_needs_it(run):
+    pending = {"ok": False, "status": "failed", "warnings": [], "export_pending": True,
+               "error": "UI scripting op 'save_panel' timed out after 45s. The export may still be pending"}
+    out, fake, seen = run(tools.export.export_audio, export_result=pending)
+    assert out["ok"] is False
+    assert [p for c, p in fake.calls if c == "set_arrangement_loop"] == [
+        {"enabled": True, "start": 0.0, "length": 64.5}]
+    assert out["loop_to_restore"] == {"enabled": True, "start": 16.0, "length": 8.0}
+    assert out["error"].endswith(
+        "The loop brace was not restored because Live may still be exporting; once Live shows "
+        "no export window, set it back with set_arrangement_loop(enabled=True, start=16, length=8)")
+
+
 def test_arrangement_end_beats():
     assert tools.export._arrangement_end_beats(ARRANGEMENT) == 64.5
     assert tools.export._arrangement_end_beats({}) == 0.0
 
+
+
+# ── a save-dialog timeout must never move the loop under a pending export ──
+
+
+from tests.unit.test_live_export import WAV_AFINFO, FakeClock, FakeLive  # noqa: E402
+
+SAVE_TIMEOUT = "UI scripting op 'save_panel' timed out after 45s"
+
+
+class WatchingAbleton(FakeAbleton):
+    """FakeAbleton that notes which Live windows were open at each LOM command."""
+
+    def __init__(self, live, **kw):
+        super().__init__({"get_arrangement_info": ARRANGEMENT}, **kw)
+        self.live = live
+        self.windows_at = []
+
+    def send_command(self, command_type, params=None):
+        self.windows_at.append((command_type, list(self.live.names())))
+        return super().send_command(command_type, params)
+
+
+def _timeout_run(tmp_path, monkeypatch, cancel_closes=True, **behaviour):
+    """export_audio over a FakeLive whose save_panel op times out with the panel still up."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    clock = FakeClock()
+    live = FakeLive(clock, **behaviour)
+
+    def timed_out(**params):
+        live.calls.append(dict(params, op="save_panel"))
+        raise live_export.UIScriptingError(SAVE_TIMEOUT)
+
+    original_call = live.call
+
+    def call(op, **params):
+        if op == "save_panel":
+            return timed_out(**params)
+        if not cancel_closes and op == "cancel":
+            live.calls.append(dict(params, op=op))
+            raise live_export.UIScriptingError(f"UI scripting op '{op}' timed out after 45s")
+        return original_call(op, **params)
+
+    live.call = call
+    exporter = live_export.LiveExporter(
+        driver=live,
+        clock=live_export._Clock(now=clock.now, monotonic=clock.monotonic, sleep=clock.sleep),
+        afinfo=lambda path: WAV_AFINFO,
+        platform="darwin",
+        audio_device=lambda: "Fireface UCX II (20 In, 20 Out)",
+    )
+    fake = WatchingAbleton(live)
+    with patch.object(connection, "get_ableton_connection", return_value=fake), \
+            patch.object(live_export, "LiveExporter", return_value=exporter):
+        out = json.loads(tools.export.export_audio(CTX, output_path=str(tmp_path / "mix.wav")))
+    return out, fake, live
+
+
+def test_save_dialog_timeout_never_restores_the_loop_while_an_export_window_is_open(
+        tmp_path, monkeypatch):
+    out, fake, live = _timeout_run(tmp_path, monkeypatch)
+    assert out["ok"] is False
+    assert SAVE_TIMEOUT in out["error"]
+    restores = [names for cmd, names in fake.windows_at[2:] if cmd == "set_arrangement_loop"]
+    assert restores, "the loop was never restored after Live closed its export windows"
+    for names in restores:
+        assert live_export.SAVE_PANEL_TITLE not in names
+        assert live_export.EXPORT_DIALOG_TITLE not in names
+    assert fake.calls[-1] == ("set_arrangement_loop", {"enabled": True, "start": 16.0, "length": 8.0})
+    assert out["export_pending"] is False
+
+
+def test_save_dialog_that_cannot_be_cancelled_leaves_the_loop_and_says_what_to_check(
+        tmp_path, monkeypatch):
+    out, fake, live = _timeout_run(tmp_path, monkeypatch, cancel_closes=False)
+    assert out["ok"] is False
+    assert live_export.SAVE_PANEL_TITLE in live.names()
+    # Only the move that set the render range; no restore while the panel is up.
+    loop_moves = [p for c, p in fake.calls if c == "set_arrangement_loop"]
+    assert loop_moves == [{"enabled": True, "start": 0.0, "length": 64.5}]
+    assert out["export_pending"] is True
+    assert "may still be pending" in out["error"]
+    assert "Save" in out["error"]
+    assert "loop brace was not restored" in out["error"]

@@ -8,8 +8,8 @@ server and is deliberately self-contained: the LOM tools never import it.
 
 Flow:
 
-1. Check Live is running and not already showing a dialog, then bring it
-   to the front.
+1. Check Live is running, is not already showing a dialog and has an
+   audio output device (from its Log.txt), then bring it to the front.
 2. Optionally give the Arrangement keyboard focus (Navigate > Arrangement
    View) and run Edit > Select Loop, so the dialog pre-fills Render Start
    and Render Length from the loop brace.
@@ -21,6 +21,12 @@ Flow:
 6. Poll until the render window is gone and the output file has stopped
    growing, then check the file with ``afinfo``: sample rate, bit depth and,
    when the caller says how long the range should be, length.
+
+If any step from 3 on fails, the Save panel and Export dialog are
+cancelled and the run waits until Live shows no window the export opened.
+When that cannot be confirmed, the result says ``export_pending``: Live may
+still be exporting, so the caller must not change the Set (the loop brace
+above all, which can stall a render at 0%) until it is clear.
 
 A run that cannot prove the output file was written is a failure. Nothing
 here reports success from the UI alone. Render Start and Render Length are
@@ -43,7 +49,7 @@ import sys
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 LIVE_BUNDLE_ID = "com.ableton.live"
 
@@ -93,6 +99,20 @@ _ERROR_WORDS = re.compile(
     r"\b(error|failed|fail|could not|couldn't|cannot|can't|unable|not enough|invalid|denied)\b",
     re.IGNORECASE,
 )
+
+# Live has no LOM property for its audio device, but it logs it to Log.txt in
+# its preferences folder: each device change writes the current one, e.g.
+# "info: Audio In Out: Output Device: No Device" once the interface is
+# unplugged, and a launch without the interface writes "info: Message Box:
+# Audio is disabled. Please choose an audio output device ...". Only lines
+# after the latest "Started: Live" line describe the Live running now.
+LIVE_PREFS_ROOT = os.path.expanduser("~/Library/Preferences/Ableton")
+_LIVE_STARTED = re.compile(r"info: Started: Live ")
+_DEVICE_EVENT = re.compile(
+    r"info: (?:Audio In Out: Output Device: (?P<device>.*?)|Message Box: (?P<disabled>Audio is disabled)\b.*?)\s*$",
+    re.MULTILINE,
+)
+NO_DEVICE = "No Device"
 
 DEFAULT_DIALOG_TIMEOUT = 15.0
 DEFAULT_RENDER_TIMEOUT = 900.0
@@ -319,6 +339,29 @@ function findControl(w, label, roles) {
   }
   throw new Error("control '" + label + "' not found in '" + safe(function () { return w.name(); }, '') + "'");
 }
+// The Save panel holds the folder's file list: thousands of elements, each
+// read with its own Apple Event, so walking entireContents() there takes
+// longer than the op timeout (observed: 2263 elements, over 45 s). This
+// search walks the window breadth first and does not go into lists, tables
+// or scroll areas, which is where the file browser lives; the panel's own
+// fields and buttons are found in under a second.
+var HEAVY_ROLES = ['AXOutline', 'AXTable', 'AXList', 'AXBrowser', 'AXScrollArea',
+                   'AXGrid', 'AXRow', 'AXColumn', 'AXCell'];
+function findControlShallow(w, label, roles) {
+  var want = norm(label), queue = [w];
+  while (queue.length) {
+    var kids = safe(function () { return queue.shift().uiElements(); }, []);
+    for (var i = 0; i < kids.length; i++) {
+      var role = safe(function () { return kids[i].role(); }, '');
+      if (roles.indexOf(role) >= 0) {
+        var ls = labelsOf(kids[i]);
+        for (var j = 0; j < ls.length; j++) if (norm(ls[j]) === want) return kids[i];
+      }
+      if (HEAVY_ROLES.indexOf(role) < 0) queue.push(kids[i]);
+    }
+  }
+  throw new Error("control '" + label + "' not found in '" + safe(function () { return w.name(); }, '') + "'");
+}
 function press(el) {
   try { el.actions.byName('AXPress').perform(); } catch (e) { SE.click(el); }
 }
@@ -534,6 +577,40 @@ function dispatch(cmd) {
       }
       return out;
     }
+    case 'cancel': {
+      // Close an export window with its Cancel button. A sheet left on it
+      // (Go to Folder, Replace) blocks the window's own buttons, so it is
+      // dismissed first: its Cancel button, else Esc with Live frontmost.
+      // With no Cancel button found, Esc cancels the window itself.
+      if (windowsNamed(p, cmd.window).length === 0) return {was_open: false, closed: true};
+      var w = windowsNamed(p, cmd.window)[0];
+      for (var t = 0; t < 3 && safe(function () { return w.sheets.length; }, 0); t++) {
+        var s = w.sheets[0];
+        var sc = safe(function () { return findControlShallow(s, 'Cancel', ['AXButton']); }, null);
+        if (sc) press(sc);
+        else { requireFront(p, cmd, 'Esc'); SE.keyCode(53); }
+        delay(0.5);
+      }
+      if (windowsNamed(p, cmd.window).length === 0) return {was_open: true, closed: true};
+      if (safe(function () { return w.sheets.length; }, 0))
+        return {ok: false, was_open: true, closed: false,
+                error: "a sheet on '" + cmd.window + "' did not close"};
+      var cancel = safe(function () { return findControlShallow(w, 'Cancel', ['AXButton']); }, null);
+      if (cancel) {
+        press(cancel);
+      } else {
+        safe(function () { w.actions.byName('AXRaise').perform(); }, null);
+        requireFront(p, cmd, 'Esc');
+        requireKeystrokeTarget(function () { return w.name() === cmd.window; }, cmd.window, 'Esc');
+        SE.keyCode(53);
+      }
+      for (var t = 0; t < 30; t++) {
+        delay(0.1);
+        if (windowsNamed(p, cmd.window).length === 0) return {was_open: true, closed: true};
+      }
+      return {ok: false, was_open: true, closed: false,
+              error: "'" + cmd.window + "' was still open after pressing Cancel"};
+    }
     case 'press': {
       var w = findWindow(p, cmd.window);
       var el = findControl(w, cmd.label, ['AXButton']);
@@ -544,7 +621,7 @@ function dispatch(cmd) {
     }
     case 'save_panel': {
       var w = findWindow(p, cmd.window);
-      var nameField = findControl(w, 'Save As:', ['AXTextField']);
+      var nameField = findControlShallow(w, 'Save As:', ['AXTextField']);
       nameField.value = cmd.filename;
       // Go to the folder: Cmd+Shift+G opens a path sheet on the panel. The
       // sheet can be slow, so wait up to 5 s, then re-send the shortcut once
@@ -594,7 +671,7 @@ function dispatch(cmd) {
                 texts: textsOf(w.sheets[0])};
       delay(0.3);
       nameField.value = cmd.filename;
-      var where = safe(function () { return findControl(w, 'Where:', ['AXPopUpButton']).value(); }, '');
+      var where = safe(function () { return findControlShallow(w, 'Where:', ['AXPopUpButton']).value(); }, '');
       if (cmd.folder_name && where && !folderMatches(where, folderNames(cmd)))
         return {ok: false, where: where,
                 error: "the Save panel is in folder '" + where + "', expected '" +
@@ -602,7 +679,7 @@ function dispatch(cmd) {
       var name = String(safe(function () { return nameField.value(); }, ''));
       if (name !== cmd.filename)
         return {ok: false, error: "the Save panel file name is '" + name + "', expected '" + cmd.filename + "'"};
-      press(findControl(w, 'Save', ['AXButton']));
+      press(findControlShallow(w, 'Save', ['AXButton']));
       // An existing file brings up a Replace confirmation sheet.
       for (var t = 0; t < 20; t++) {
         delay(0.1);
@@ -717,6 +794,37 @@ def _extra_windows(status: Dict[str, Any], baseline: Sequence[str]) -> List[str]
     return extra
 
 
+def read_live_audio_output_device(prefs_root: Optional[str] = None) -> Optional[str]:
+    """The output device the running Live last logged, or None if unknown.
+
+    Reads the most recently written ``Live */Log.txt`` under ``prefs_root``
+    and returns the last "Output Device" Live logged since it was started,
+    or "No Device" when that is what it logged or it said audio is disabled.
+    None means the log could not be read or says nothing about the device
+    for this launch, so the device is unknown.
+    """
+    root = prefs_root or LIVE_PREFS_ROOT
+    try:
+        logs = [os.path.join(root, d, "Log.txt") for d in os.listdir(root) if d.startswith("Live ")]
+    except OSError:
+        return None
+    logs = [p for p in logs if os.path.isfile(p)]
+    if not logs:
+        return None
+    try:
+        with open(max(logs, key=os.path.getmtime), encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+    starts = list(_LIVE_STARTED.finditer(text))
+    if not starts:
+        return None
+    device = None
+    for event in _DEVICE_EVENT.finditer(text, starts[-1].end()):
+        device = NO_DEVICE if event.group("disabled") else event.group("device")
+    return device
+
+
 def _parse_afinfo(text: str) -> Dict[str, Any]:
     info: Dict[str, Any] = {}
     m = re.search(r"File type ID:\s*(\S+)", text)
@@ -747,10 +855,12 @@ class LiveExporter:
         afinfo: Optional[Callable[[str], Optional[str]]] = None,
         platform: Optional[str] = None,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
+        audio_device: Optional[Callable[[], Optional[str]]] = None,
     ):
         self.driver = driver or JXADriver()
         self.clock = clock or _Clock()
         self.afinfo = afinfo or _run_afinfo
+        self.audio_device = audio_device or read_live_audio_output_device
         self.platform = platform or sys.platform
         self.poll_interval = poll_interval
         self.steps: List[Dict[str, Any]] = []
@@ -790,9 +900,71 @@ class LiveExporter:
 
     def _cancel(self, window: str) -> None:
         try:
-            self.driver.call("press", window=window, label=CANCEL_BUTTON)
+            self.driver.call("cancel", window=window)
         except Exception:  # best effort while already failing
             pass
+
+    def preflight(self) -> List[str]:
+        """Check Live can take an export now, before anything in it is moved.
+
+        Fails when Live is not running, is showing a dialog (an Export
+        dialog or Save panel left from an earlier run included), or logs no
+        audio output device. Returns warnings for what could not be checked.
+        """
+        status = self._status()
+        if not status.get("running"):
+            raise ExportError("Ableton Live is not running")
+        windows = status.get("windows", [])
+        busy = _busy_windows(windows)
+        busy += [n for n in (EXPORT_DIALOG_TITLE, SAVE_PANEL_TITLE)
+                 if n in _window_names(status) and n not in busy]
+        if busy:
+            raise ExportError(
+                "Live is showing a dialog or modal window ("
+                + ", ".join(busy)
+                + "); close it before exporting"
+            )
+        device = self.audio_device()
+        if device is None:
+            return ["could not read Live's audio output device from its Log.txt; "
+                    "the audio interface was not checked"]
+        if device.strip().lower() == NO_DEVICE.lower():
+            raise ExportError(
+                "Live has no audio output device (its Log.txt says audio is disabled or "
+                "the output device is 'No Device'), so the audio interface is missing or "
+                "unplugged; "
+                "reconnect it, or choose an output device in Live's Settings > Audio, "
+                "then export again"
+            )
+        return []
+
+    def _settle(self, baseline: Sequence[str], timeout: float) -> Optional[List[str]]:
+        """Cancel the export windows and wait until Live shows none it opened.
+
+        Returns [] once Live shows no window that was not open at baseline
+        (no Export dialog, Save panel or render window). Otherwise returns
+        what is still open, or None when Live's windows could not be read.
+        """
+        self._cancel(SAVE_PANEL_TITLE)
+        self._cancel(EXPORT_DIALOG_TITLE)
+        deadline = self.clock.monotonic() + timeout
+        while True:
+            try:
+                status = self._status()
+            except ExportError:
+                extra: Optional[List[str]] = None
+            else:
+                if not status.get("running"):
+                    return []
+                extra = _extra_windows(status, baseline)
+                if not extra:
+                    return []
+            if self.clock.monotonic() >= deadline:
+                return extra
+            for name in (SAVE_PANEL_TITLE, EXPORT_DIALOG_TITLE):
+                if extra and name in extra:
+                    self._cancel(name)
+            self.clock.sleep(min(0.25, self.poll_interval))
 
     def _texts(self, name: str) -> List[str]:
         """Static text of every window with this name ('' for the untitled ones)."""
@@ -825,6 +997,10 @@ class LiveExporter:
             "output_path": None,
             "output_files": [],
             "warnings": [],
+            # True when the export failed and Live may still be in it (an
+            # export window or render could not be shown closed): nothing in
+            # the Set may be changed until it is.
+            "export_pending": False,
         }
         try:
             request.validate()
@@ -849,17 +1025,7 @@ class LiveExporter:
 
     def _export(self, request: ExportRequest, result: Dict[str, Any]) -> None:
         check_preconditions(request, self.platform)
-
-        status = self._status()
-        if not status.get("running"):
-            raise ExportError("Ableton Live is not running")
-        busy = _busy_windows(status.get("windows", []))
-        if busy:
-            raise ExportError(
-                "Live is showing a dialog or modal window ("
-                + ", ".join(busy)
-                + "); close it before exporting"
-            )
+        result["warnings"] += self.preflight()
 
         activated = self._require(self._call("activate"), "could not bring Live to the front")
         if not activated.get("frontmost"):
@@ -878,56 +1044,92 @@ class LiveExporter:
 
         baseline = _window_names(self._status())
         untitled_shown = self._texts("") if "" in baseline else []
-        opened = self._call("menu", path=[FILE_MENU, EXPORT_MENU_ITEM])
-        if not opened.get("ok") and opened.get("missing"):
-            # Menu item renamed or localized: fall back to the shortcut.
-            self._call("keystroke", **EXPORT_SHORTCUT)
-        elif not opened.get("ok"):
-            raise ExportError(f"could not open the Export dialog: {opened.get('error')}")
         try:
-            if not self._wait_for_window(EXPORT_DIALOG_TITLE, request.dialog_timeout):
-                raise ExportError(
-                    f"the '{EXPORT_DIALOG_TITLE}' dialog did not appear within "
-                    f"{request.dialog_timeout:.0f}s"
-                )
-            for step in build_dialog_plan(request):
-                self._apply(step)
-            settings = self._call("controls", window=EXPORT_DIALOG_TITLE).get("controls", [])
-            result["dialog_settings"] = {
-                c["label"]: c["value"] for c in settings
-                if c.get("label") and c.get("role") in ("AXButton", "AXPopUpButton") and c.get("value")
-            }
-            self._require(
-                self._call("press", window=EXPORT_DIALOG_TITLE, label=EXPORT_BUTTON),
-                "could not press Export",
-            )
-            if not self._wait_for_window(SAVE_PANEL_TITLE, request.dialog_timeout):
-                texts = self._new_window_texts(
-                    _extra_windows(self._status(), baseline), untitled_shown
-                )
-                if texts:
-                    result["dialog_text"] = texts
-                raise ExportError(
-                    f"the Save panel did not appear within {request.dialog_timeout:.0f}s after Export"
-                )
-            start_wall = self.clock.now()
-            self._require(
-                self._call(
-                    "save_panel",
-                    window=SAVE_PANEL_TITLE,
-                    directory=request.directory,
-                    filename=request.stem,
-                    folder_name=os.path.basename(request.directory.rstrip(os.sep)),
-                    replace=bool(request.overwrite),
-                ),
-                "could not fill in the Save panel",
-            )
-        except Exception:
-            self._cancel(SAVE_PANEL_TITLE)
-            self._cancel(EXPORT_DIALOG_TITLE)
-            raise
+            # From here on Live may be in the export, so any failure first
+            # cancels it and checks Live came out of it (export_pending).
+            opened = self._call("menu", path=[FILE_MENU, EXPORT_MENU_ITEM])
+            if not opened.get("ok") and opened.get("missing"):
+                # Menu item renamed or localized: fall back to the shortcut.
+                self._call("keystroke", **EXPORT_SHORTCUT)
+            elif not opened.get("ok"):
+                raise ExportError(f"could not open the Export dialog: {opened.get('error')}")
+            path, start_wall = self._drive_export(request, baseline, untitled_shown, result)
+        except Exception as e:
+            try:
+                still_open = self._settle(baseline, request.dialog_timeout)
+            except Exception:
+                still_open = None
+            if still_open == []:
+                raise
+            result["export_pending"] = True
+            reason = str(e) if isinstance(e, ExportError) else f"unexpected export error: {e}"
+            shows = (", ".join(n or "(untitled)" for n in still_open) if still_open
+                     else "windows that could not be read")
+            raise ExportError(
+                f"{reason}. The export may still be pending: Live's export windows could "
+                f"not be confirmed closed (Live still shows: {shows}). Check Live for an "
+                f"open {EXPORT_DIALOG_TITLE} dialog, Save panel or render progress window, "
+                "and cancel it or let the render finish before changing the Set or "
+                "exporting again"
+            ) from e
+        self._check_output(request, path, start_wall, result)
 
+    def _drive_export(
+        self,
+        request: ExportRequest,
+        baseline: Sequence[str],
+        untitled_shown: Sequence[str],
+        result: Dict[str, Any],
+    ) -> Tuple[str, float]:
+        """Drive the Export dialog and Save panel, then wait out the render.
+
+        Returns the rendered file and when the render started. Returns only
+        once Live shows no window the export opened.
+        """
+        if not self._wait_for_window(EXPORT_DIALOG_TITLE, request.dialog_timeout):
+            raise ExportError(
+                f"the '{EXPORT_DIALOG_TITLE}' dialog did not appear within "
+                f"{request.dialog_timeout:.0f}s"
+            )
+        for step in build_dialog_plan(request):
+            self._apply(step)
+        settings = self._call("controls", window=EXPORT_DIALOG_TITLE).get("controls", [])
+        result["dialog_settings"] = {
+            c["label"]: c["value"] for c in settings
+            if c.get("label") and c.get("role") in ("AXButton", "AXPopUpButton") and c.get("value")
+        }
+        self._require(
+            self._call("press", window=EXPORT_DIALOG_TITLE, label=EXPORT_BUTTON),
+            "could not press Export",
+        )
+        if not self._wait_for_window(SAVE_PANEL_TITLE, request.dialog_timeout):
+            texts = self._new_window_texts(
+                _extra_windows(self._status(), baseline), untitled_shown
+            )
+            if texts:
+                result["dialog_text"] = texts
+            raise ExportError(
+                f"the Save panel did not appear within {request.dialog_timeout:.0f}s after Export"
+            )
+        start_wall = self.clock.now()
+        self._require(
+            self._call(
+                "save_panel",
+                window=SAVE_PANEL_TITLE,
+                directory=request.directory,
+                filename=request.stem,
+                folder_name=os.path.basename(request.directory.rstrip(os.sep)),
+                replace=bool(request.overwrite),
+            ),
+            "could not fill in the Save panel",
+        )
         path = self._wait_for_render(request, baseline, untitled_shown, start_wall, result)
+        return path, start_wall
+
+    def _check_output(
+        self, request: ExportRequest, path: str, start_wall: float, result: Dict[str, Any]
+    ) -> None:
+        """Check the rendered file (and video); Live has finished with it by now."""
         result["output_path"] = path
         result["output_files"] = [path]
         self._verify_audio(request, path, result)
