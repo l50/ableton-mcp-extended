@@ -1012,6 +1012,34 @@ class TestPendingExport:
         last_cancel = max(i for i, c in enumerate(live.calls) if c["op"] == "cancel")
         assert live.calls[-1]["op"] == "status" and len(live.calls) - 1 > last_cancel
 
+    def test_late_save_panel_after_the_cancels_is_cancelled_before_live_reads_clear(
+            self, tmp_path, clock):
+        live, exporter = make(clock, save_panel_appears=False)
+        original = live.op_status
+        polls_after_cancel = []
+
+        def status():
+            if "cancel" in live.ops():
+                polls_after_cancel.append(len(live.calls) - 1)
+                if len(polls_after_cancel) == 2:
+                    # Live's Save panel only shows up after the first post-cancel poll.
+                    live.open_window(le.SAVE_PANEL_TITLE, modal=True)
+            return original()
+
+        live.op_status = status
+        result = exporter.run(request(tmp_path))
+        assert result["ok"] is False
+        assert "Save panel did not appear" in result["error"]
+        assert result["export_pending"] is False
+        assert le.SAVE_PANEL_TITLE not in live.names()
+        assert le.EXPORT_DIALOG_TITLE not in live.names()
+        late_cancel = max(i for i, c in enumerate(live.calls)
+                          if c["op"] == "cancel" and c["window"] == le.SAVE_PANEL_TITLE)
+        assert late_cancel > polls_after_cancel[1]
+        # Clear was only reported after enough clean polls once the panel was gone.
+        assert len([i for i in polls_after_cancel if i > late_cancel]) >= le.STABLE_POLLS
+        assert live.calls[-1]["op"] == "status"
+
     def test_save_panel_that_will_not_cancel_is_reported_pending(self, tmp_path, clock):
         live, exporter = make(clock, save_panel_times_out=True, uncancellable=(le.SAVE_PANEL_TITLE,))
         result = exporter.run(request(tmp_path))

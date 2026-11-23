@@ -941,13 +941,15 @@ class LiveExporter:
     def _settle(self, baseline: Sequence[str], timeout: float) -> Optional[List[str]]:
         """Cancel the export windows and wait until Live shows none it opened.
 
-        Returns [] once Live shows no window that was not open at baseline
-        (no Export dialog, Save panel or render window). Otherwise returns
-        what is still open, or None when Live's windows could not be read.
+        Returns [] once STABLE_POLLS polls in a row show no window that was
+        not open at baseline (no Export dialog, Save panel or render window).
+        Otherwise returns what is still open, or None when Live's windows
+        could not be read.
         """
         self._cancel(SAVE_PANEL_TITLE)
         self._cancel(EXPORT_DIALOG_TITLE)
         deadline = self.clock.monotonic() + timeout
+        clear = 0
         while True:
             try:
                 status = self._status()
@@ -957,8 +959,9 @@ class LiveExporter:
                 if not status.get("running"):
                     return []
                 extra = _extra_windows(status, baseline)
-                if not extra:
-                    return []
+            clear = clear + 1 if extra == [] else 0
+            if clear >= STABLE_POLLS:
+                return []
             if self.clock.monotonic() >= deadline:
                 return extra
             for name in (SAVE_PANEL_TITLE, EXPORT_DIALOG_TITLE):
