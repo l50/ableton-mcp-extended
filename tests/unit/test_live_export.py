@@ -1053,6 +1053,27 @@ class TestPendingExport:
         assert len([c for c in live.driven("cancel") if c["window"] == le.SAVE_PANEL_TITLE]) > 1
         assert clock.sleeps <= 3 / 0.25 + 1
 
+    def test_window_that_closes_only_at_the_timeout_is_reported_pending(self, tmp_path, clock):
+        live, exporter = make(clock, save_panel_times_out=True, uncancellable=(le.SAVE_PANEL_TITLE,))
+        original = live.op_status
+        cancelled_at = []
+
+        def status():
+            if "cancel" in live.ops():
+                if not cancelled_at:
+                    cancelled_at.append(clock.t)
+                # The Save panel finally closes on the poll that reaches the timeout.
+                if clock.t >= cancelled_at[0] + 3:
+                    live.close_window(le.SAVE_PANEL_TITLE)
+            return original()
+
+        live.op_status = status
+        result = exporter.run(request(tmp_path))
+        assert result["ok"] is False
+        assert le.SAVE_PANEL_TITLE not in live.names()
+        assert result["export_pending"] is True
+        assert "Live still shows: Save" in result["error"]
+
     def test_unreadable_windows_after_a_failure_are_reported_pending(self, tmp_path, clock):
         live, exporter = make(clock, status_fails_after="save_panel", save_panel_times_out=True)
         result = exporter.run(request(tmp_path))

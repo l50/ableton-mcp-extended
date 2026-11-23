@@ -943,13 +943,15 @@ class LiveExporter:
 
         Returns [] once STABLE_POLLS polls in a row show no window that was
         not open at baseline (no Export dialog, Save panel or render window).
-        Otherwise returns what is still open, or None when Live's windows
-        could not be read.
+        Otherwise returns what is still open (or was last seen open when the
+        timeout ends before Live has shown clear long enough), or None when
+        that cannot be told.
         """
         self._cancel(SAVE_PANEL_TITLE)
         self._cancel(EXPORT_DIALOG_TITLE)
         deadline = self.clock.monotonic() + timeout
         clear = 0
+        last_open: Optional[List[str]] = None
         while True:
             try:
                 status = self._status()
@@ -962,8 +964,10 @@ class LiveExporter:
             clear = clear + 1 if extra == [] else 0
             if clear >= STABLE_POLLS:
                 return []
+            if extra:
+                last_open = extra
             if self.clock.monotonic() >= deadline:
-                return extra
+                return last_open if extra == [] else extra
             for name in (SAVE_PANEL_TITLE, EXPORT_DIALOG_TITLE):
                 if extra and name in extra:
                     self._cancel(name)
