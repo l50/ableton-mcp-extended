@@ -264,7 +264,19 @@ class FakeLive:
             return {"ok": True, "pressed": label}
         return {"ok": False, "error": f"unexpected press {label}"}
 
+    def op_cancel(self, window):
+        if window not in self.names():
+            return {"ok": True, "was_open": False, "closed": True}
+        if window in self.b.get("uncancellable", ()):
+            return {"ok": False, "was_open": True, "closed": False,
+                    "error": f"'{window}' was still open after pressing Cancel"}
+        self.close_window(window)
+        return {"ok": True, "was_open": True, "closed": True}
+
     def op_save_panel(self, window, directory, filename, folder_name, replace):
+        if self.b.get("save_panel_times_out"):
+            # osascript was killed mid-op: the Save panel is still up.
+            raise le.UIScriptingError("UI scripting op 'save_panel' timed out after 45s")
         if self.b.get("save_panel_error"):
             return {"ok": False, "error": self.b["save_panel_error"]}
         self.close_window(le.SAVE_PANEL_TITLE)
@@ -310,13 +322,15 @@ def clock():
     return FakeClock()
 
 
-def make(clock, afinfo=WAV_AFINFO, platform="darwin", **behaviour):
+def make(clock, afinfo=WAV_AFINFO, platform="darwin", audio_device="Fireface UCX II (20 In, 20 Out)",
+         **behaviour):
     live = FakeLive(clock, **behaviour)
     exporter = le.LiveExporter(
         driver=live,
         clock=le._Clock(now=clock.now, monotonic=clock.monotonic, sleep=clock.sleep),
         afinfo=(lambda path: afinfo),
         platform=platform,
+        audio_device=(lambda: audio_device),
     )
     return live, exporter
 
@@ -738,7 +752,7 @@ class TestExportFailure:
         live, exporter = make(clock, stuck_toggles=(le.NORMALIZE,))
         self.assert_failed(exporter.run(request(tmp_path, normalize=True)),
                            "'Normalize' is False after toggling, expected True")
-        assert live.driven("press")[-1]["label"] == "Cancel"
+        assert live.driven("cancel")[-1]["window"] == le.EXPORT_DIALOG_TITLE
         assert le.EXPORT_DIALOG_TITLE not in live.names()
         assert "save_panel" not in live.ops()
 
@@ -748,7 +762,7 @@ class TestExportFailure:
         result = self.assert_failed(exporter.run(request(tmp_path)),
                                     "could not set 'Sample Rate' to 48000: it reads '44100'")
         assert "choices seen: 44100" in result["error"]
-        assert live.driven("press")[-1]["label"] == "Cancel"
+        assert live.driven("cancel")[-1]["window"] == le.EXPORT_DIALOG_TITLE
 
     def test_rendered_track_list_not_led_by_the_main_bus(self, tmp_path, clock):
         live, exporter = make(clock)
@@ -760,7 +774,7 @@ class TestExportFailure:
             "Chooser' list is 'All Individual Tracks', expected Main or Master")
         # The track named Main further down is neither accepted nor chosen.
         assert live.controls[le.RENDERED_TRACK]["index"] == 2
-        assert live.driven("press")[-1]["label"] == "Cancel"
+        assert live.driven("cancel")[-1]["window"] == le.EXPORT_DIALOG_TITLE
         assert "save_panel" not in live.ops()
 
     def test_rendered_track_still_on_a_track_after_choosing_the_top_entry(self, tmp_path, clock):
@@ -771,7 +785,7 @@ class TestExportFailure:
                                             "options": ["Main", "1 Audio", "Master"]}
         self.assert_failed(exporter.run(request(tmp_path)),
                            "could not set 'Rendered Track Chooser' to Main: it reads 'Master'")
-        assert live.driven("press")[-1]["label"] == "Cancel"
+        assert live.driven("cancel")[-1]["window"] == le.EXPORT_DIALOG_TITLE
         assert "save_panel" not in live.ops()
 
     def test_control_not_found(self, tmp_path, clock):
@@ -840,7 +854,7 @@ class TestExportFailure:
         live, exporter = make(clock, save_panel_error="the Save panel is in folder 'Music', expected 'out'")
         self.assert_failed(exporter.run(request(tmp_path)),
                            "could not fill in the Save panel: the Save panel is in folder 'Music'")
-        cancels = [c["window"] for c in live.driven("press") if c["label"] == "Cancel"]
+        cancels = [c["window"] for c in live.driven("cancel")]
         assert cancels == ["Save", "Export Audio/Video"]
 
     def test_no_output_file(self, tmp_path, clock):
@@ -876,7 +890,12 @@ class TestExportFailure:
         result = self.assert_failed(exporter.run(request(tmp_path)),
                                     "Live reported an error during export: " + message)
         assert result["dialog_text"] == {"(untitled)": [message]}
-        assert clock.sleeps < 5
+        # Not the 30 s render timeout: only the 3 s check that the export
+        # windows closed, which the untitled alert (it could be the render
+        # window) keeps from confirming.
+        assert clock.sleeps <= 3 / 0.25 + 1
+        assert result["export_pending"] is True
+        assert "may still be pending" in result["error"]
 
     def test_progress_text_is_not_an_error(self, tmp_path, clock):
         live, exporter = make(clock, window_texts={"": ["Rendering audio..."]})
@@ -975,6 +994,255 @@ class TestExportFailure:
         live, exporter = make(clock, never_writes=True)
         live.op_texts = lambda window: (_ for _ in ()).throw(le.ExportError("no window"))
         self.assert_failed(exporter.run(request(tmp_path, render_timeout=3)), "no output file")
+
+
+class TestPendingExport:
+    """A failure mid-export cancels it and says whether Live came out of it."""
+
+    def test_save_panel_timeout_cancels_both_windows_and_confirms_live_is_idle(self, tmp_path, clock):
+        live, exporter = make(clock, save_panel_times_out=True)
+        result = exporter.run(request(tmp_path))
+        assert result["ok"] is False
+        assert result["error"] == "UI scripting op 'save_panel' timed out after 45s"
+        assert result["export_pending"] is False
+        assert [c["window"] for c in live.driven("cancel")] == [le.SAVE_PANEL_TITLE, le.EXPORT_DIALOG_TITLE]
+        assert le.SAVE_PANEL_TITLE not in live.names()
+        assert le.EXPORT_DIALOG_TITLE not in live.names()
+        # The idle check came after the cancels.
+        last_cancel = max(i for i, c in enumerate(live.calls) if c["op"] == "cancel")
+        assert live.calls[-1]["op"] == "status" and len(live.calls) - 1 > last_cancel
+
+    def test_late_save_panel_after_the_cancels_is_cancelled_before_live_reads_clear(
+            self, tmp_path, clock):
+        live, exporter = make(clock, save_panel_appears=False)
+        original = live.op_status
+        polls_after_cancel = []
+
+        def status():
+            if "cancel" in live.ops():
+                polls_after_cancel.append(len(live.calls) - 1)
+                if len(polls_after_cancel) == 2:
+                    # Live's Save panel only shows up after the first post-cancel poll.
+                    live.open_window(le.SAVE_PANEL_TITLE, modal=True)
+            return original()
+
+        live.op_status = status
+        result = exporter.run(request(tmp_path))
+        assert result["ok"] is False
+        assert "Save panel did not appear" in result["error"]
+        assert result["export_pending"] is False
+        assert le.SAVE_PANEL_TITLE not in live.names()
+        assert le.EXPORT_DIALOG_TITLE not in live.names()
+        late_cancel = max(i for i, c in enumerate(live.calls)
+                          if c["op"] == "cancel" and c["window"] == le.SAVE_PANEL_TITLE)
+        assert late_cancel > polls_after_cancel[1]
+        # Clear was only reported after enough clean polls once the panel was gone.
+        assert len([i for i in polls_after_cancel if i > late_cancel]) >= le.STABLE_POLLS
+        assert live.calls[-1]["op"] == "status"
+
+    def test_save_panel_that_will_not_cancel_is_reported_pending(self, tmp_path, clock):
+        live, exporter = make(clock, save_panel_times_out=True, uncancellable=(le.SAVE_PANEL_TITLE,))
+        result = exporter.run(request(tmp_path))
+        assert result["ok"] is False
+        assert result["export_pending"] is True
+        assert result["error"].startswith("UI scripting op 'save_panel' timed out after 45s. ")
+        assert "The export may still be pending" in result["error"]
+        assert "Live still shows: Save" in result["error"]
+        assert "render progress window" in result["error"]
+        # Cancel was retried while waiting, within the dialog timeout.
+        assert len([c for c in live.driven("cancel") if c["window"] == le.SAVE_PANEL_TITLE]) > 1
+        assert clock.sleeps <= 3 / 0.25 + 1
+
+    def test_window_that_closes_only_at_the_timeout_is_reported_pending(self, tmp_path, clock):
+        live, exporter = make(clock, save_panel_times_out=True, uncancellable=(le.SAVE_PANEL_TITLE,))
+        original = live.op_status
+        cancelled_at = []
+
+        def status():
+            if "cancel" in live.ops():
+                if not cancelled_at:
+                    cancelled_at.append(clock.t)
+                # The Save panel finally closes on the poll that reaches the timeout.
+                if clock.t >= cancelled_at[0] + 3:
+                    live.close_window(le.SAVE_PANEL_TITLE)
+            return original()
+
+        live.op_status = status
+        result = exporter.run(request(tmp_path))
+        assert result["ok"] is False
+        assert le.SAVE_PANEL_TITLE not in live.names()
+        assert result["export_pending"] is True
+        assert "Live still shows: Save" in result["error"]
+
+    def test_unreadable_windows_after_a_failure_are_reported_pending(self, tmp_path, clock):
+        live, exporter = make(clock, status_fails_after="save_panel", save_panel_times_out=True)
+        result = exporter.run(request(tmp_path))
+        assert result["export_pending"] is True
+        assert "Live still shows: windows that could not be read" in result["error"]
+
+    def test_render_still_running_at_the_timeout_is_reported_pending(self, tmp_path, clock):
+        live, exporter = make(clock, window_stays=True)
+        result = exporter.run(request(tmp_path, render_timeout=6))
+        assert result["ok"] is False
+        assert result["export_pending"] is True
+        assert "render did not finish within 6s" in result["error"]
+        assert "Live still shows: (untitled)" in result["error"]
+
+    def test_retry_while_the_earlier_render_runs_is_refused_until_live_is_clear(
+            self, tmp_path, clock):
+        live, exporter = make(clock, window_stays=True)
+        first = exporter.run(request(tmp_path, render_timeout=6))
+        assert first["export_pending"] is True
+        ops_before = len(live.calls)
+
+        retry = exporter.run(request(tmp_path, name="again.wav"))
+        assert retry["ok"] is False and retry["export_pending"] is False
+        assert "an earlier export did not finish cleanly" in retry["error"]
+        assert "Live still shows: (untitled)" in retry["error"]
+        assert {c["op"] for c in live.calls[ops_before:]} == {"status"}
+
+        # Once the render is over, the next export runs.
+        live._rendering = None
+        live.windows = [w for w in live.windows if w["name"] != ""]
+        live.b["window_stays"] = False
+        done = exporter.run(request(tmp_path, name="done.wav"))
+        assert done["ok"] is True, done
+
+    @pytest.mark.parametrize("change", ["save_as", "plugin_window"])
+    def test_windows_an_export_cannot_leave_do_not_hold_a_pending_export(
+            self, tmp_path, clock, change):
+        live, exporter = make(clock, window_stays=True)
+        assert exporter.run(request(tmp_path, render_timeout=6))["export_pending"] is True
+        live._rendering = None
+        live.windows = [w for w in live.windows if w["name"] != ""]
+        live.b["window_stays"] = False
+        if change == "save_as":
+            next(w for w in live.windows if w["name"] == "My Song")["name"] = "My Song v20"
+        else:
+            live.open_window("Pro-Q 3/1-Bass", subrole="AXStandardWindow")
+        done = exporter.run(request(tmp_path, name="done.wav"))
+        assert done["ok"] is True, done
+
+    def test_pending_export_gate_clears_when_each_status_poll_takes_time(self, tmp_path, clock):
+        live, exporter = make(clock, window_stays=True)
+        assert exporter.run(request(tmp_path, render_timeout=6))["export_pending"] is True
+        original = live.op_status
+
+        def slow_status():
+            clock.t += 0.3
+            return original()
+
+        live.op_status = slow_status
+        before = len(live.calls)
+        refused = exporter.run(request(tmp_path, name="again.wav"))
+        assert refused["ok"] is False
+        assert "Live still shows: (untitled)" in refused["error"]
+        # Refused on the first poll that shows the render, without waiting.
+        assert [c["op"] for c in live.calls[before:]] == ["status"]
+
+        live._rendering = None
+        live.windows = [w for w in live.windows if w["name"] != ""]
+        live.b["window_stays"] = False
+        done = exporter.run(request(tmp_path, name="done.wav"))
+        assert done["ok"] is True, done
+
+    def test_failure_before_the_dialog_opens_is_not_pending(self, tmp_path, clock):
+        live, exporter = make(clock, export_menu="disabled")
+        result = exporter.run(request(tmp_path))
+        assert result["export_pending"] is False
+
+    def test_success_is_not_pending(self, tmp_path, clock):
+        live, exporter = make(clock)
+        result = exporter.run(request(tmp_path))
+        assert result["ok"] is True, result
+        assert result["export_pending"] is False
+        assert "cancel" not in live.ops()
+
+    def test_bad_file_after_a_finished_render_is_not_pending(self, tmp_path, clock):
+        live, exporter = make(clock, afinfo=afinfo_for(44100, WAV_24))
+        result = exporter.run(request(tmp_path))
+        assert result["ok"] is False and result["export_pending"] is False
+        assert "cancel" not in live.ops()
+
+
+class TestPreflight:
+    def test_no_audio_device_stops_before_live_is_touched(self, tmp_path, clock):
+        live, exporter = make(clock, audio_device="No Device")
+        result = exporter.run(request(tmp_path))
+        assert result["ok"] is False
+        assert "Live has no audio output device" in result["error"]
+        assert "says audio is disabled or the output device is 'No Device'" in result["error"]
+        assert "missing or unplugged" in result["error"]
+        assert live.ops() == ["status"]
+
+    def test_unknown_audio_device_is_a_warning(self, tmp_path, clock):
+        live, exporter = make(clock, audio_device=None)
+        result = exporter.run(request(tmp_path))
+        assert result["ok"] is True, result
+        assert any("audio interface was not checked" in w for w in result["warnings"])
+
+    @pytest.mark.parametrize("name", [le.EXPORT_DIALOG_TITLE, le.SAVE_PANEL_TITLE])
+    def test_export_window_left_open_refuses(self, tmp_path, clock, name):
+        live, exporter = make(clock)
+        live.open_window(name, subrole="AXStandardWindow")
+        with pytest.raises(le.ExportError, match="close it before exporting"):
+            exporter.preflight()
+        assert live.ops() == ["status"]
+
+    def test_ready_live_passes(self, clock):
+        live, exporter = make(clock)
+        assert exporter.preflight() == []
+
+
+class TestReadAudioDevice:
+    def write_log(self, root, version, text, mtime):
+        d = root / f"Live {version}"
+        d.mkdir()
+        log = d / "Log.txt"
+        log.write_text(text)
+        os.utime(log, (mtime, mtime))
+
+    START = "2026-11-23T09:46:31.692203: info: Started: Live 12.4.16 Build: x\n"
+
+    def out(self, name):
+        return f"2026-11-23T09:47:03.246817: info: Audio In Out: Output Device: {name}\n"
+
+    def test_last_device_since_the_latest_start_wins(self, tmp_path):
+        text = (self.START + self.out("Fireface UCX II (24196183) (20 In, 20 Out)")
+                + self.START + self.out("Fireface UCX II (24196183) (20 In, 20 Out)")
+                + self.out("No Device"))
+        self.write_log(tmp_path, "12.4.16", text, 2000)
+        assert le.read_live_audio_output_device(str(tmp_path)) == "No Device"
+
+    # Live 12.4.16 launched without its interface (observed 2026-11-23).
+    DISABLED = ("2026-11-23T10:51:03.780477: info: Message Box: Audio is disabled. "
+                "Please choose an audio output device in the Audio Settings.\n")
+
+    def test_a_launch_with_audio_disabled_has_no_device(self, tmp_path):
+        self.write_log(tmp_path, "12.4.16", self.START + self.out("Fireface UCX II (20 In, 20 Out)")
+                       + self.START + self.DISABLED, 2000)
+        assert le.read_live_audio_output_device(str(tmp_path)) == "No Device"
+
+    def test_a_device_chosen_after_audio_was_disabled_wins(self, tmp_path):
+        self.write_log(tmp_path, "12.4.16", self.START + self.DISABLED
+                       + self.out("MacBook Pro Speakers (0 In, 2 Out)"), 2000)
+        assert le.read_live_audio_output_device(str(tmp_path)) == "MacBook Pro Speakers (0 In, 2 Out)"
+
+    def test_earlier_launches_are_ignored(self, tmp_path):
+        self.write_log(tmp_path, "12.4.16", self.START + self.out("No Device") + self.START, 2000)
+        assert le.read_live_audio_output_device(str(tmp_path)) is None
+
+    def test_the_most_recently_written_log_is_read(self, tmp_path):
+        self.write_log(tmp_path, "12.4.15", self.START + self.out("No Device"), 1000)
+        self.write_log(tmp_path, "12.4.16", self.START + self.out("MacBook Pro Speakers (0 In, 2 Out)"), 2000)
+        assert le.read_live_audio_output_device(str(tmp_path)) == "MacBook Pro Speakers (0 In, 2 Out)"
+
+    def test_unknown_without_a_start_line_log_or_folder(self, tmp_path):
+        self.write_log(tmp_path, "12.4.16", self.out("No Device"), 2000)
+        assert le.read_live_audio_output_device(str(tmp_path)) is None
+        assert le.read_live_audio_output_device(str(tmp_path / "missing")) is None
+        (tmp_path / "empty").mkdir()
+        assert le.read_live_audio_output_device(str(tmp_path / "empty")) is None
 
 
 def test_export_from_live_uses_given_exporter(tmp_path, clock):

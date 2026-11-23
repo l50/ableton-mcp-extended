@@ -223,7 +223,7 @@ Live's Remote Script API has no way to start an export, so `export_audio` and `e
 
 Requirements:
 
-- macOS, with Ableton Live running. Live must not have another dialog open. The tools find the Export dialog's controls by the accessibility names Live 12 gives them, so an older Live may not work.
+- macOS, with Ableton Live running and an audio device selected. Live must not have another dialog open. The tools read Live's current output device from its `Log.txt`. If Live reports `No Device` (an unplugged interface, for example), they stop before touching anything. If the log can't be read, `warnings` says the device wasn't checked. The tools find the Export dialog's controls by the accessibility names Live 12 gives them, so an older Live may not work.
 - The app that runs the MCP server (Claude Desktop, your terminal, Cursor) needs **Accessibility** permission (System Settings > Privacy & Security > Accessibility). It also needs permission to control **System Events** (Automation). macOS asks for this the first time.
 - Leave the mouse and keyboard alone until the tool returns. Live is in front during the export, and the call blocks until the render finishes, which can take minutes.
 
@@ -240,11 +240,13 @@ What gets set:
 | `overwrite` | Replace an existing file | false |
 | `render_timeout` | Seconds to wait for the render to finish | 900 (`export_video`: 1800) |
 
-Rendered Track is always set to Main. `arrangement` moves the loop brace over the whole Arrangement to select it, and puts the brace back afterwards. `arrangement` and `loop` also switch Live to the Arrangement View, give it keyboard focus, and leave it there. Live keeps the dialog settings these tools choose for your next manual export. Options the tools don't expose (dither, Render as Loop, Convert to Mono, Create Analysis File, video encoder) are left as they are.
+Rendered Track is always set to Main. `arrangement` moves the loop brace over the whole Arrangement to select it, and puts the brace back once Live is out of the export. `arrangement` and `loop` also switch Live to the Arrangement View, give it keyboard focus, and leave it there. Live keeps the dialog settings these tools choose for your next manual export. Options the tools don't expose (dither, Render as Loop, Convert to Mono, Create Analysis File, video encoder) are left as they are.
 
 Live renders what is playing, so `arrangement` and `loop` refuse to run while Session clips override the Arrangement (the Back to Arrangement button is lit). Click it first, or use `selection` to render what you hear.
 
 The reply is JSON. `ok` is true only when the output file exists and has stopped growing, and `afinfo` doesn't report a different sample rate or bit depth or, for `arrangement` and `loop`, a different length than the request. If `afinfo` can't be run or leaves one of those values out, `ok` stays true and `warnings` says what wasn't checked. A failure comes back as `ok: false` with the reason in `error`. That covers a dialog that never opened, a control that wouldn't change, an unwritable folder, an existing file, a render timeout, or an error message Live showed (quoted verbatim in `dialog_text`). The reply also lists every UI step it took.
+
+If the export fails once the Export dialog has been asked for (the Save panel timing out, say), the tools cancel the Save panel and the Export dialog, then wait until Live shows no window the export opened. Nothing in the Set moves while an export window or a render is still up, because changing the loop mid-render can leave Live's render stuck at 0%. When Live can't be shown to be clear, `export_pending` is true. The loop brace is left where the render needs it, `loop_to_restore` says where it was, and `error` says what to check in Live. Until Live is shown clear of that export, the next export call stops before touching the Set and says so.
 
 The tools don't read Render Start and Render Length back from the dialog, so `render_range` in the reply is the range you asked for, and the file's length is the only check on it. `rendered_seconds` is the length `afinfo` reports. `expected_seconds` is the range's length in beats at the Set's current tempo, and `length_verified` is true when the two agree to within half a second. If they don't, the file stays where it was written and the reply is `ok: false`. That check assumes one tempo, so a Set whose tempo changes inside the range fails it even when the file is right. `selection` has no expected length and is never length-verified.
 

@@ -39,7 +39,7 @@ sys.modules.setdefault("_Framework.ControlSurface", _cs_module)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from AbletonMCP_Remote_Script import MAIN_THREAD_COMMANDS  # noqa: E402
-from MCP_Server import connection, plugin_discovery, tools  # noqa: E402
+from MCP_Server import connection, live_export, plugin_discovery, tools  # noqa: E402
 
 _PLACEHOLDERS = {int: 1, float: 1.0, str: "x", bool: True}
 
@@ -105,9 +105,12 @@ def sent_by_tool():
             plugin_discovery.invalidate_external_plugin_cache()
             conn = MagicMock()
             conn.send_command.return_value = dict(_RESPONSE)
-            # The export tools only talk to Live on macOS.
+            # The export tools only talk to Live on macOS. Their UI-scripting
+            # preflight is stubbed: this module-scoped fixture runs before the
+            # per-test guard that blocks osascript.
             with patch.object(connection, "get_ableton_connection", return_value=conn), \
-                    patch.object(sys, "platform", "darwin"):
+                    patch.object(sys, "platform", "darwin"), \
+                    patch.object(live_export.LiveExporter, "preflight", return_value=[]):
                 tool(MagicMock(), **_call_args(name, tool))
             sent[name] = [c.args[0] for c in conn.send_command.call_args_list]
     finally:

@@ -29,7 +29,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node is not installed")
 # Builds the fake world, then the driver source is appended and run() is
 # called with the JSON command passed on argv.
 _PRELUDE = r"""
-var LOG = {keys: [], stray: [], pressed: [], clicked: [], typed: [], activated: 0, relaunched: 0, focused: 0, stale_focus: 0};  // stray: keys sent while Live was not frontmost
+var LOG = {keys: [], stray: [], pressed: [], clicked: [], typed: [], activated: 0, relaunched: 0, focused: 0, stale_focus: 0, heavy: 0};  // stray: keys sent while Live was not frontmost
 var WORLD = JSON.parse(process.argv[2]);
 var CLOCK = {now: 0, g: []};  // fake seconds; g: when each Cmd+Shift+G arrived
 var SHEET = WORLD.sheet || {};  // late: seconds before the sheet shows; ignore: shortcuts swallowed
@@ -96,9 +96,16 @@ function mk(spec) {
     if (spec.press) ACTIONS[spec.press](o);
   }}; }};
   o.kids = (spec.kids || []).map(mk);
+  o.uiElements = function () {
+    if (spec.heavy) LOG.heavy++;  // a file list the driver should not walk
+    return o.kids;
+  };
   return o;
 }
 var windows = WORLD.windows.map(mk);
+// A sheet already on a window (open_sheet), e.g. a Go to Folder sheet left
+// behind when osascript was killed mid save_panel.
+windows.forEach(function (w) { if (w.spec.open_sheet) w.sheets = [mk(w.spec.open_sheet)]; });
 function byDesc(desc) {
   var hit = null;
   windows.forEach(function (w) { w.entireContents().forEach(function (c) {
@@ -124,7 +131,18 @@ var ACTIONS = {
       return !w.entireContents().some(function (c) { return c.role() === 'AXMenuItem'; });
     });
   },
-  toggle: function (sw) { sw.spec.value = sw.spec.value === 'On' ? 'Off' : 'On'; }
+  toggle: function (sw) { sw.spec.value = sw.spec.value === 'On' ? 'Off' : 'On'; },
+  // A Cancel button closes its window, unless a sheet on it blocks it.
+  closeWindow: function (btn) {
+    windows = windows.filter(function (w) {
+      return w.sheets.length || w.entireContents().indexOf(btn) < 0;
+    });
+  },
+  closeSheet: function (btn) {
+    windows.forEach(function (w) {
+      w.sheets = w.sheets.filter(function (s) { return s.entireContents().indexOf(btn) < 0; });
+    });
+  }
 };
 // Live is frontmost unless the world says it lost the front: front: 'lost' gets
 // it back on a focus request; front: 'never' ignores one. Keys sent while
@@ -199,7 +217,11 @@ function Application(name) {
       if (!FRONT || !KEYBOARD_FOCUS) { LOG.stray.push(code); return; }
       LOG.keys.push(code);
       if (code === 36) { CLOCK.done = true; windows.forEach(function (w) { w.sheets = []; }); }  // Return: go
-      if (code === 53) {  // Esc: close an open menu window only
+      if (code === 53) {  // Esc: close a sheet, else a window that Esc cancels, else a menu
+        var sheeted = windows.filter(function (w) { return w.sheets.length; });
+        if (sheeted.length) { sheeted[0].sheets = []; return; }
+        var escapable = windows.filter(function (w) { return w.spec.esc_closes; });
+        if (escapable.length) { windows = windows.filter(function (w) { return w !== escapable[0]; }); return; }
         windows = windows.filter(function (w) {
           return !w.entireContents().some(function (c) { return c.role() === 'AXMenuItem'; });
         });
@@ -732,3 +754,135 @@ def test_save_panel_reactivates_live_before_the_path_and_return_keystrokes(no_fi
     assert reply["_log"]["keys"] == keys
     assert reply["_log"]["stray"] == []
     assert reply["_log"]["pressed"] == ["Save"]
+
+
+def cancel_world(sheet=None, cancel_works=True):
+    """The Save panel, maybe with a sheet left on it, and Live's main window."""
+    panel = {"role": "AXWindow", "subrole": "AXDialog", "name": "Save", "kids": [
+        {"role": "AXTextField", "description": "Save As:", "value": "song", "writable": True},
+        {"role": "AXButton", "description": "Cancel", "press": "closeWindow" if cancel_works else None},
+        {"role": "AXButton", "description": "Save"},
+    ]}
+    if sheet:
+        panel["open_sheet"] = sheet
+    return {"windows": [panel, {"role": "AXWindow", "subrole": "AXStandardWindow", "name": "Untitled"}]}
+
+
+def test_cancel_presses_cancel_and_waits_for_the_window_to_close():
+    reply = drive("cancel", cancel_world(), window="Save")
+    assert reply["ok"] is True, reply
+    assert (reply["was_open"], reply["closed"]) == (True, True)
+    assert reply["_log"]["pressed"] == ["Cancel"]
+    assert reply["_windows"] == [["Untitled", "AXStandardWindow"]]
+
+
+def test_cancel_of_a_window_that_is_not_open_does_nothing():
+    reply = drive("cancel", cancel_world(), window="Export Audio/Video")
+    assert reply["ok"] is True
+    assert (reply["was_open"], reply["closed"]) == (False, True)
+    assert reply["_log"]["pressed"] == [] and reply["_log"]["keys"] == []
+
+
+def test_cancel_dismisses_a_go_to_folder_sheet_with_esc_first():
+    sheet = {"role": "AXSheet", "kids": [{"role": "AXTextField", "description": "path"}]}
+    reply = drive("cancel", cancel_world(sheet=sheet), window="Save")
+    assert reply["ok"] is True, reply
+    assert reply["_log"]["keys"] == [53]
+    assert reply["_log"]["pressed"] == ["Cancel"]
+    assert reply["_windows"] == [["Untitled", "AXStandardWindow"]]
+
+
+def test_cancel_uses_a_sheets_own_cancel_button():
+    sheet = {"role": "AXSheet", "kids": [
+        {"role": "AXButton", "description": "Cancel", "press": "closeSheet"},
+        {"role": "AXButton", "description": "Replace"}]}
+    reply = drive("cancel", cancel_world(sheet=sheet), window="Save")
+    assert reply["ok"] is True, reply
+    assert reply["_log"]["keys"] == []
+    assert reply["_log"]["pressed"] == ["Cancel", "Cancel"]
+    assert reply["_windows"] == [["Untitled", "AXStandardWindow"]]
+
+
+def test_cancel_does_not_send_esc_while_live_cannot_get_the_front():
+    sheet = {"role": "AXSheet", "kids": []}
+    world = cancel_world(sheet=sheet)
+    world["front"] = "never"
+    reply = drive("cancel", world, window="Save")
+    assert reply["ok"] is False
+    assert "was not frontmost" in reply["error"]
+    assert reply["_log"]["keys"] == [] and reply["_log"]["stray"] == []
+
+
+def test_cancel_reports_a_window_that_stays_open():
+    reply = drive("cancel", cancel_world(cancel_works=False), window="Save")
+    assert reply["ok"] is False
+    assert (reply["was_open"], reply["closed"]) == (True, False)
+    assert reply["error"] == "'Save' was still open after pressing Cancel"
+
+
+def nested_save_panel_world(where="live-test"):
+    """The Save panel as Live 12.4.16 shows it (2026-11-23): controls under a
+    split group, beside a scroll area holding the folder's file list, which
+    in a busy folder is thousands of elements."""
+    files = [{"role": "AXRow", "kids": [{"role": "AXCell", "kids": [
+        {"role": "AXStaticText", "value": f"take{i}.wav"}]}]} for i in range(50)]
+    # A decoy: a file-list element labelled like the panel's buttons.
+    files.append({"role": "AXButton", "description": "Cancel", "press": "closeWindow"})
+    return {"sheet": {}, "front": "yes", "windows": [
+        {"role": "AXWindow", "subrole": "AXDialog", "name": "Save", "kids": [
+            {"role": "AXSplitGroup", "kids": [
+                {"role": "AXScrollArea", "heavy": True, "kids": [
+                    {"role": "AXOutline", "heavy": True, "kids": files}]},
+                {"role": "AXGroup", "kids": [
+                    {"role": "AXTextField", "name": "Save As:", "value": "", "writable": True},
+                    {"role": "AXPopUpButton", "title": "Where:", "value": where},
+                    {"role": "AXButton", "title": "Cancel", "description": "button",
+                     "press": "closeWindow"},
+                    {"role": "AXButton", "title": "Save", "description": "button"},
+                ]},
+            ]},
+        ]},
+        {"role": "AXWindow", "subrole": "AXStandardWindow", "name": "Untitled"},
+    ], "display_names": {}}
+
+
+def test_save_panel_finds_its_controls_without_walking_the_file_list():
+    reply = save(nested_save_panel_world(), "/tmp/x/live-test")
+    assert reply["ok"] is True, reply
+    assert reply["where"] == "live-test"
+    assert reply["_log"]["typed"] == ["song", "/tmp/x/live-test", "song"]
+    assert reply["_log"]["pressed"] == ["button"]  # the panel's Save
+    assert reply["_log"]["heavy"] == 0
+
+
+def test_cancel_presses_the_panels_cancel_without_walking_the_file_list():
+    reply = drive("cancel", nested_save_panel_world(), window="Save")
+    assert reply["ok"] is True, reply
+    assert (reply["was_open"], reply["closed"]) == (True, True)
+    assert reply["_log"]["pressed"] == ["button"]  # the panel's Cancel, not the decoy
+    assert reply["_log"]["heavy"] == 0
+    assert reply["_windows"] == [["Untitled", "AXStandardWindow"]]
+
+
+def test_cancel_sends_esc_when_the_window_has_no_cancel_button_in_reach():
+    world = cancel_world()
+    panel = world["windows"][0]
+    panel["kids"] = [k for k in panel["kids"] if k.get("description") != "Cancel"]
+    panel["esc_closes"] = True
+    reply = drive("cancel", world, window="Save")
+    assert reply["ok"] is True, reply
+    assert reply["_log"]["keys"] == [53]
+    assert reply["_log"]["pressed"] == []
+    assert reply["_windows"] == [["Untitled", "AXStandardWindow"]]
+
+
+def test_cancel_does_not_send_esc_to_another_app():
+    world = cancel_world()
+    panel = world["windows"][0]
+    panel["kids"] = [k for k in panel["kids"] if k.get("description") != "Cancel"]
+    panel["esc_closes"] = True
+    world["front"] = "never"
+    reply = drive("cancel", world, window="Save")
+    assert reply["ok"] is False
+    assert "was not frontmost" in reply["error"]
+    assert reply["_log"]["keys"] == [] and reply["_log"]["stray"] == []

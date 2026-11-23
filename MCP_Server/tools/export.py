@@ -33,6 +33,7 @@ def _export_failure(message: str, **extra: Any) -> dict[str, Any]:
         "output_files": [],
         "error": message,
         "warnings": [],
+        "export_pending": False,
     }
     payload.update(extra)
     return payload
@@ -85,6 +86,10 @@ def _run_live_export(
     try:
         request.validate()
         live_export.check_preconditions(request)
+        exporter = live_export.LiveExporter()
+        # Before the loop brace is touched: Live must not be in an earlier
+        # export, and must have an audio device to render through.
+        exporter.preflight()
         if range_name != "selection":
             ableton = connection.get_ableton_connection()
             info = ableton.send_command("get_arrangement_info", {"track_index": ALL_TRACKS})
@@ -125,12 +130,22 @@ def _run_live_export(
                     {"enabled": restore_loop["enabled"], "start": 0.0, "length": beats},
                 )
             ableton.send_command("set_view", {"view_name": "Arranger"})
-        result = live_export.export_from_live(request)
+        result = live_export.export_from_live(request, exporter)
     except Exception as e:
         logger.error("Error exporting from Live: %s", e)
         result = _export_failure(f"Error exporting from Live: {e}")
     finally:
-        if restore_loop is not None and ableton is not None:
+        if restore_loop is not None and ableton is not None and result.get("export_pending"):
+            # Live may still have the export dialog, Save panel or a render
+            # going: moving the loop now can kill the render, so leave it.
+            result["loop_to_restore"] = restore_loop
+            result["error"] = (
+                f"{result.get('error') or 'export failed'}. The loop brace was not restored "
+                "because Live may still be exporting; once Live shows no export window, set "
+                f"it back with set_arrangement_loop(enabled={restore_loop['enabled']}, "
+                f"start={restore_loop['start']:g}, length={restore_loop['length']:g})"
+            )
+        elif restore_loop is not None and ableton is not None:
             try:
                 ableton.send_command("set_arrangement_loop", restore_loop)
             except Exception as e:
@@ -167,7 +182,9 @@ def export_audio(
     - sample_rate: 22050, 32000, 44100, 48000, 88200, 96000, 176400 or 192000.
     - bit_depth: 16, 24 or 32 (PCM formats only).
     - render_range: "arrangement" = bar 1 to the end of the last arrangement clip
-      (the loop brace is moved to select it, then restored); "loop" = the current
+      (the loop brace is moved to select it, then restored once Live is out of the
+      export; if a failed export cannot be shown closed, export_pending is true
+      and the brace is left, with loop_to_restore saying where it was); "loop" = the current
       loop brace; "selection" = whatever Live pre-fills (the current time selection).
       "arrangement" and "loop" refuse to run while Session clips override the
       Arrangement (Back to Arrangement lit).
@@ -175,10 +192,18 @@ def export_audio(
     - overwrite: Replace output_path if it already exists.
     - render_timeout: Seconds to wait for the render to finish.
 
+    Fails before touching Live when Live logs no audio output device (the
+    audio interface is unplugged), is already showing a dialog, or an earlier
+    call returned export_pending and Live is not yet shown clear of that export.
+
     Returns JSON: {ok, status, output_path, output_files, expected_path,
     format, sample_rate, bit_depth, normalize, create_video, render_range,
     expected_seconds, rendered_seconds, length_verified, dialog_settings,
-    file_info, steps, warnings, error?, dialog_text?}. ok is true only when
+    file_info, steps, warnings, export_pending, error?, dialog_text?,
+    loop_to_restore?}. On a failure after the Export dialog was asked for, the
+    dialogs are cancelled and export_pending is false only once Live shows no
+    export window; when true, the export may still be running in Live and
+    nothing in the Set was moved back. ok is true only when
     the file exists and has stopped growing, and it is false when afinfo
     reports a sample rate, bit depth or, for "arrangement" and "loop", length
     other than the one requested. If afinfo cannot be run or does not report
