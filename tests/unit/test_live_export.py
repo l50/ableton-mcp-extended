@@ -1123,6 +1123,29 @@ class TestPendingExport:
         done = exporter.run(request(tmp_path, name="done.wav"))
         assert done["ok"] is True, done
 
+    def test_pending_export_gate_clears_when_each_status_poll_takes_time(self, tmp_path, clock):
+        live, exporter = make(clock, window_stays=True)
+        assert exporter.run(request(tmp_path, render_timeout=6))["export_pending"] is True
+        original = live.op_status
+
+        def slow_status():
+            clock.t += 0.3
+            return original()
+
+        live.op_status = slow_status
+        before = len(live.calls)
+        refused = exporter.run(request(tmp_path, name="again.wav"))
+        assert refused["ok"] is False
+        assert "Live still shows: (untitled)" in refused["error"]
+        # Refused on the first poll that shows the render, without waiting.
+        assert [c["op"] for c in live.calls[before:]] == ["status"]
+
+        live._rendering = None
+        live.windows = [w for w in live.windows if w["name"] != ""]
+        live.b["window_stays"] = False
+        done = exporter.run(request(tmp_path, name="done.wav"))
+        assert done["ok"] is True, done
+
     def test_failure_before_the_dialog_opens_is_not_pending(self, tmp_path, clock):
         live, exporter = make(clock, export_menu="disabled")
         result = exporter.run(request(tmp_path))
