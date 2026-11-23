@@ -1088,6 +1088,26 @@ class TestPendingExport:
         assert "render did not finish within 6s" in result["error"]
         assert "Live still shows: (untitled)" in result["error"]
 
+    def test_retry_while_the_earlier_render_runs_is_refused_until_live_is_clear(
+            self, tmp_path, clock):
+        live, exporter = make(clock, window_stays=True)
+        first = exporter.run(request(tmp_path, render_timeout=6))
+        assert first["export_pending"] is True
+        ops_before = len(live.calls)
+
+        retry = exporter.run(request(tmp_path, name="again.wav"))
+        assert retry["ok"] is False and retry["export_pending"] is False
+        assert "an earlier export did not finish cleanly" in retry["error"]
+        assert "Live still shows: (untitled)" in retry["error"]
+        assert {c["op"] for c in live.calls[ops_before:]} == {"status"}
+
+        # Once the render is over, the next export runs.
+        live._rendering = None
+        live.windows = [w for w in live.windows if w["name"] != ""]
+        live.b["window_stays"] = False
+        done = exporter.run(request(tmp_path, name="done.wav"))
+        assert done["ok"] is True, done
+
     def test_failure_before_the_dialog_opens_is_not_pending(self, tmp_path, clock):
         live, exporter = make(clock, export_menu="disabled")
         result = exporter.run(request(tmp_path))

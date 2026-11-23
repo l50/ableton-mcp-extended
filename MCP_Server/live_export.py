@@ -53,6 +53,10 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 LIVE_BUNDLE_ID = "com.ableton.live"
 
+# Windows Live showed before the last export this process left pending, or
+# None. While set, no export may start until Live is shown clear of it.
+_pending_baseline: Optional[List[str]] = None
+
 EXPORT_DIALOG_TITLE = "Export Audio/Video"
 SAVE_PANEL_TITLE = "Save"
 FILE_MENU = "File"
@@ -778,6 +782,12 @@ def _window_names(status: Dict[str, Any]) -> List[str]:
     return [w.get("name", "") for w in status.get("windows", [])]
 
 
+def _describe_windows(still_open: Optional[Sequence[str]]) -> str:
+    if still_open:
+        return ", ".join(n or "(untitled)" for n in still_open)
+    return "windows that could not be read"
+
+
 def _extra_windows(status: Dict[str, Any], baseline: Sequence[str]) -> List[str]:
     """Windows open now that were not open at baseline, counted by name.
 
@@ -907,10 +917,22 @@ class LiveExporter:
     def preflight(self) -> List[str]:
         """Check Live can take an export now, before anything in it is moved.
 
-        Fails when Live is not running, is showing a dialog (an Export
+        Fails when an earlier export left pending is not yet shown finished
+        or cancelled, Live is not running, is showing a dialog (an Export
         dialog or Save panel left from an earlier run included), or logs no
         audio output device. Returns warnings for what could not be checked.
         """
+        global _pending_baseline
+        if _pending_baseline is not None:
+            still_open = self._settle(_pending_baseline,
+                                      STABLE_POLLS * min(0.25, self.poll_interval), cancel=False)
+            if still_open != []:
+                raise ExportError(
+                    "an earlier export did not finish cleanly and may still be running in "
+                    f"Live (Live still shows: {_describe_windows(still_open)}); let its "
+                    "render finish or cancel it in Live, then export again"
+                )
+            _pending_baseline = None
         status = self._status()
         if not status.get("running"):
             raise ExportError("Ableton Live is not running")
@@ -938,8 +960,12 @@ class LiveExporter:
             )
         return []
 
-    def _settle(self, baseline: Sequence[str], timeout: float) -> Optional[List[str]]:
+    def _settle(
+        self, baseline: Sequence[str], timeout: float, cancel: bool = True
+    ) -> Optional[List[str]]:
         """Cancel the export windows and wait until Live shows none it opened.
+
+        With cancel False nothing is cancelled; it only waits.
 
         Returns [] once STABLE_POLLS polls in a row show no window that was
         not open at baseline (no Export dialog, Save panel or render window).
@@ -947,8 +973,9 @@ class LiveExporter:
         timeout ends before Live has shown clear long enough), or None when
         that cannot be told.
         """
-        self._cancel(SAVE_PANEL_TITLE)
-        self._cancel(EXPORT_DIALOG_TITLE)
+        if cancel:
+            self._cancel(SAVE_PANEL_TITLE)
+            self._cancel(EXPORT_DIALOG_TITLE)
         deadline = self.clock.monotonic() + timeout
         clear = 0
         last_open: Optional[List[str]] = None
@@ -969,7 +996,7 @@ class LiveExporter:
             if self.clock.monotonic() >= deadline:
                 return last_open if extra == [] else extra
             for name in (SAVE_PANEL_TITLE, EXPORT_DIALOG_TITLE):
-                if extra and name in extra:
+                if cancel and extra and name in extra:
                     self._cancel(name)
             self.clock.sleep(min(0.25, self.poll_interval))
 
@@ -1031,6 +1058,7 @@ class LiveExporter:
         return result
 
     def _export(self, request: ExportRequest, result: Dict[str, Any]) -> None:
+        global _pending_baseline
         check_preconditions(request, self.platform)
         result["warnings"] += self.preflight()
 
@@ -1069,12 +1097,11 @@ class LiveExporter:
             if still_open == []:
                 raise
             result["export_pending"] = True
+            _pending_baseline = list(baseline)
             reason = str(e) if isinstance(e, ExportError) else f"unexpected export error: {e}"
-            shows = (", ".join(n or "(untitled)" for n in still_open) if still_open
-                     else "windows that could not be read")
             raise ExportError(
                 f"{reason}. The export may still be pending: Live's export windows could "
-                f"not be confirmed closed (Live still shows: {shows}). Check Live for an "
+                f"not be confirmed closed (Live still shows: {_describe_windows(still_open)}). Check Live for an "
                 f"open {EXPORT_DIALOG_TITLE} dialog, Save panel or render progress window, "
                 "and cancel it or let the render finish before changing the Set or "
                 "exporting again"

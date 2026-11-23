@@ -367,3 +367,27 @@ def test_save_dialog_that_cannot_be_cancelled_leaves_the_loop_and_says_what_to_c
     assert "may still be pending" in out["error"]
     assert "Save" in out["error"]
     assert "loop brace was not restored" in out["error"]
+
+
+def test_retry_while_a_pending_render_runs_never_moves_the_loop(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    clock = FakeClock()
+    live = FakeLive(clock, window_stays=True)
+    exporter = live_export.LiveExporter(
+        driver=live,
+        clock=live_export._Clock(now=clock.now, monotonic=clock.monotonic, sleep=clock.sleep),
+        afinfo=lambda path: WAV_AFINFO,
+        platform="darwin",
+        audio_device=lambda: "Fireface UCX II (20 In, 20 Out)",
+    )
+    first, retry = WatchingAbleton(live), WatchingAbleton(live)
+    with patch.object(live_export, "LiveExporter", return_value=exporter):
+        with patch.object(connection, "get_ableton_connection", return_value=first):
+            out = json.loads(tools.export.export_audio(
+                CTX, output_path=str(tmp_path / "mix.wav"), render_timeout=6))
+        assert out["export_pending"] is True
+        with patch.object(connection, "get_ableton_connection", return_value=retry):
+            again = json.loads(tools.export.export_audio(CTX, output_path=str(tmp_path / "again.wav")))
+    assert again["ok"] is False
+    assert "an earlier export did not finish cleanly" in again["error"]
+    assert retry.calls == []

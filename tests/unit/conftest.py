@@ -16,3 +16,11 @@ def _no_osascript(cmd, *args, **kwargs):
 def _block_ui_scripting(monkeypatch):
     """Fail any unit test that would reach real macOS UI scripting."""
     monkeypatch.setattr(subprocess, "run", _no_osascript)
+
+
+@pytest.fixture(autouse=True)
+def _no_pending_export_between_tests(monkeypatch):
+    """Each test starts with no export left pending by an earlier one."""
+    from MCP_Server import live_export
+
+    monkeypatch.setattr(live_export, "_pending_baseline", None)

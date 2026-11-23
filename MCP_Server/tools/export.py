@@ -193,7 +193,8 @@ def export_audio(
     - render_timeout: Seconds to wait for the render to finish.
 
     Fails before touching Live when Live logs no audio output device (the
-    audio interface is unplugged) or is already showing a dialog.
+    audio interface is unplugged), is already showing a dialog, or an earlier
+    call returned export_pending and Live is not yet shown clear of that export.
 
     Returns JSON: {ok, status, output_path, output_files, expected_path,
     format, sample_rate, bit_depth, normalize, create_video, render_range,
