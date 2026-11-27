@@ -11,7 +11,18 @@ from MCP_Server.tools import (
     export,
     recording,
     session,
+    take_lanes,
     tracks,
 )
 
-TOOL_MODULES = (session, tracks, recording, clips, browser, arrangement, devices, export)
+TOOL_MODULES = (
+    session,
+    tracks,
+    recording,
+    clips,
+    browser,
+    arrangement,
+    devices,
+    export,
+    take_lanes,
+)
