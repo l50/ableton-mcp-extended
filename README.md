@@ -282,6 +282,26 @@ ABLETON_MCP_LIVE_TESTS=1 ABLETON_MCP_CLIP_EDIT_FILE=/path/to/take.wav \
 
 ---
 
+## Devices Inside Racks, and Loading by File Path
+
+### Device paths
+
+`get_device_parameters`, `set_device_parameter`, `get_chain_info`, `enable_device` and `disable_device` take a `device_path` that reaches a device at any rack depth. `chain_index` only goes one rack deep and then always means the chain's first device.
+
+A path alternates devices and chains and starts with a device on the track. A bare number is a device and `cN` is a chain; every number is 1-based. `"1/c2/1/c1/1"` is device 1 on the track, its chain 2, the first device on that chain, that device's chain 1, and the first device on that chain. A list works too: `[1, ["chain", 2], 1, ["chain", 1], 1]` (a Python tuple like `("chain", 2)` is the same).
+
+- `get_device_parameters`, `set_device_parameter`, `enable_device` and `disable_device` need a path that ends on a device.
+- `get_chain_info` takes a path that ends on a rack, which lists the rack's chains, or on a chain (`"1/c2"`), which lists that chain's devices.
+- `device_path` replaces `device_index`, `device_name` and `chain_index`. Giving both is an error, and so is a path that doesn't lead to a device. The error names the step that failed.
+
+A Remote Script that predates device paths would ignore `device_path` and act on the track's first device. The tools send an out-of-range `device_index` with every path, so that older script rejects the request instead.
+
+### Loading a device, preset or rack by path
+
+`load_device_from_path(track_index, path)` loads a file by walking Live's browser by name, so it reaches files that have no usable browser URI: a Max for Live device (`.amxd`), a device preset (`.adv`) or a rack (`.adg`) saved in the User Library. The path is relative to the User Library, for example `Presets/MIDI Effects/Max MIDI Effect/My Device.amxd`. Start the path with `Current Project`, `Packs` or the name of a folder added to Live's Places to look there instead. Names match without regard to case, and the extension may be left off when only one file has that name. The reply names the device that appeared on the track and its 1-based index. The command fails without loading anything when a path part isn't found (the error lists what that folder holds), when the path names a folder, or when the load adds no device.
+
+---
+
 ## Components Overview
 
 This project includes several specialized components:

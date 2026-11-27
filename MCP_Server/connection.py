@@ -39,6 +39,7 @@ MODIFYING_COMMANDS = (
     "start_playback",
     "stop_playback",
     "load_browser_item",
+    "load_device_from_path",
     "set_song_time",
     "set_arrangement_loop",
     "jump_to_cue",

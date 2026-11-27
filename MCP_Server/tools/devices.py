@@ -6,6 +6,7 @@ from mcp.server.fastmcp import Context
 
 from MCP_Server import connection
 from MCP_Server.conversions import optional_to_zero_based, to_zero_based
+from MCP_Server.device_paths import DEVICE, DevicePath, WirePath, parse_device_path, path_request
 from MCP_Server.plugin_aliases import get_alias_for_param, get_categories, resolve_alias
 from MCP_Server.tools.base import ableton_tool
 
@@ -28,6 +29,20 @@ def _devices_named(
     return [d for d in info.get("devices", []) if d["name"].lower() == name.lower()]
 
 
+def _path_target(
+    device_path: DevicePath, chain_index: int, *, allow_chain_end: bool = False
+) -> WirePath | None:
+    """Parse the optional device_path; None when the caller did not give one.
+
+    A path replaces device_index and chain_index, so giving both is an error.
+    """
+    if not device_path:
+        return None
+    if chain_index:
+        raise ValueError("Give device_path or chain_index, not both")
+    return parse_device_path(device_path, allow_chain_end=allow_chain_end)
+
+
 def _describe_devices(devices: list[dict[str, Any]]) -> str:
     return ", ".join(f"{d['name']} (index {d['index'] + 1})" for d in devices)
 
@@ -40,6 +55,7 @@ def get_device_parameters(
     chain_index: int = 0,
     category: str = "",
     show_all: bool = False,
+    device_path: str | list[Any] = "",
 ) -> str:
     """List parameters for a device on a track.
 
@@ -47,6 +63,10 @@ def get_device_parameters(
     - track_index: Track number (1-based).
     - device_index: Device number on the track (1-based, default 1).
     - chain_index: Chain number inside a rack (1-based, 0 = no chain).
+    - device_path: Reach a device at any rack depth, replacing device_index and
+      chain_index. A string like "1/c2/1/c1/1" (device 1, its chain 2, the first
+      device on that chain, its chain 1, the first device there) or a list like
+      [1, ["chain", 2], 1, ["chain", 1], 1]. All numbers are 1-based.
     - category: Filter by category name (returns detail for that category).
     - show_all: If True, return all parameters in detail mode.
 
@@ -55,13 +75,15 @@ def get_device_parameters(
     """
     ableton = connection.get_ableton_connection()
     ti = to_zero_based(track_index, "track_index")
-    di = to_zero_based(device_index, "device_index")
-    ci = optional_to_zero_based(chain_index, "chain_index")
-    result = ableton.send_command(
-        "get_device_parameters",
-        # Always fetch the full list; grouping happens here.
-        {"track_index": ti, "device_index": di, "chain_index": ci, "show_all": True},
-    )
+    wire = _path_target(device_path, chain_index)
+    if wire is not None:
+        target = path_request(ti, wire)
+    else:
+        di = to_zero_based(device_index, "device_index")
+        ci = optional_to_zero_based(chain_index, "chain_index")
+        target = {"track_index": ti, "device_index": di, "chain_index": ci}
+    # Always fetch the full list; grouping happens here.
+    result = ableton.send_command("get_device_parameters", {**target, "show_all": True})
 
     device_name = result.get("device_name", "Unknown")
     params = result.get("parameters", [])
@@ -119,6 +141,7 @@ def set_device_parameter(
     parameter_name: str = "",
     parameter_index: int = 0,
     value: float = 0.0,
+    device_path: str | list[Any] = "",
 ) -> str:
     """Set a device parameter value.
 
@@ -126,16 +149,23 @@ def set_device_parameter(
     - track_index: Track number (1-based).
     - device_index: Device number (1-based, default 1).
     - chain_index: Chain number inside a rack (1-based, 0 = no chain).
+    - device_path: Reach a device at any rack depth, replacing device_index and
+      chain_index: "1/c2/1/c1/1" or [1, ["chain", 2], 1, ["chain", 1], 1]
+      (1-based; a bare number is a device, cN or ["chain", N] is a chain).
     - parameter_name: Parameter name, friendly alias, or partial match.
     - parameter_index: Parameter number (1-based, alternative to name).
     - value: Normalized value 0.0-1.0.
     """
     ableton = connection.get_ableton_connection()
     ti = to_zero_based(track_index, "track_index")
-    di = to_zero_based(device_index, "device_index")
-    ci = optional_to_zero_based(chain_index, "chain_index")
+    wire = _path_target(device_path, chain_index)
+    if wire is not None:
+        device = path_request(ti, wire)
+    else:
+        di = to_zero_based(device_index, "device_index")
+        ci = optional_to_zero_based(chain_index, "chain_index")
+        device = {"track_index": ti, "device_index": di, "chain_index": ci}
     pi = optional_to_zero_based(parameter_index, "parameter_index")
-    device = {"track_index": ti, "device_index": di, "chain_index": ci}
 
     resolved_name = parameter_name
     alias_used = None
@@ -169,11 +199,25 @@ def set_device_parameter(
 
 
 def _set_device_enabled(
-    track_index: int, device_index: int, device_name: str, chain_index: int, enabled: bool
+    track_index: int,
+    device_index: int,
+    device_name: str,
+    chain_index: int,
+    enabled: bool,
+    device_path: DevicePath = "",
 ) -> str:
     """Shared body of enable_device and disable_device."""
     ableton = connection.get_ableton_connection()
     ti = to_zero_based(track_index, "track_index")
+    wire = _path_target(device_path, chain_index)
+    if wire is not None:
+        if device_name or device_index:
+            raise ValueError("Give device_path or device_index/device_name, not both")
+        result = ableton.send_command(
+            "set_device_enabled", {**path_request(ti, wire), "enabled": enabled}
+        )
+        state = "enabled" if result.get("is_active", enabled) else "disabled"
+        return f"{result.get('device_name', '?')} {state}"
     di = optional_to_zero_based(device_index, "device_index")
     ci = optional_to_zero_based(chain_index, "chain_index")
 
@@ -205,6 +249,7 @@ def enable_device(
     device_index: int = 0,
     device_name: str = "",
     chain_index: int = 0,
+    device_path: str | list[Any] = "",
 ) -> str:
     """Enable (activate) a device on a track.
 
@@ -213,8 +258,12 @@ def enable_device(
     - device_index: Device number (1-based). Use 0 if using device_name.
     - device_name: Device name (alternative to device_index).
     - chain_index: Chain number inside a rack (1-based, 0 = no chain).
+    - device_path: Reach a device at any rack depth instead of device_index,
+      device_name and chain_index: "1/c2/1" or [1, ["chain", 2], 1] (1-based).
     """
-    return _set_device_enabled(track_index, device_index, device_name, chain_index, True)
+    return _set_device_enabled(
+        track_index, device_index, device_name, chain_index, True, device_path
+    )
 
 
 @ableton_tool("toggling device")
@@ -224,6 +273,7 @@ def disable_device(
     device_index: int = 0,
     device_name: str = "",
     chain_index: int = 0,
+    device_path: str | list[Any] = "",
 ) -> str:
     """Disable (bypass) a device on a track.
 
@@ -232,8 +282,12 @@ def disable_device(
     - device_index: Device number (1-based). Use 0 if using device_name.
     - device_name: Device name (alternative to device_index).
     - chain_index: Chain number inside a rack (1-based, 0 = no chain).
+    - device_path: Reach a device at any rack depth instead of device_index,
+      device_name and chain_index: "1/c2/1" or [1, ["chain", 2], 1] (1-based).
     """
-    return _set_device_enabled(track_index, device_index, device_name, chain_index, False)
+    return _set_device_enabled(
+        track_index, device_index, device_name, chain_index, False, device_path
+    )
 
 
 @ableton_tool("getting chain info")
@@ -242,6 +296,7 @@ def get_chain_info(
     track_index: int,
     device_index: int = 1,
     chain_index: int = 0,
+    device_path: str | list[Any] = "",
 ) -> str:
     """List chains in a rack device, or devices within a specific chain.
 
@@ -249,16 +304,27 @@ def get_chain_info(
     - track_index: Track number (1-based).
     - device_index: Device number (1-based, default 1).
     - chain_index: Chain number (1-based) to drill into. 0 = list all chains.
+    - device_path: Reach a rack at any depth, replacing device_index and
+      chain_index. A path ending on a rack ("1/c2/1") lists that rack's chains;
+      one ending on a chain ("1/c2/1/c1") lists that chain's devices. A bare
+      number is a device, cN a chain (1-based); a list works too:
+      [1, ["chain", 2], 1, ["chain", 1]].
     """
     ableton = connection.get_ableton_connection()
     ti = to_zero_based(track_index, "track_index")
-    di = to_zero_based(device_index, "device_index")
-    ci = optional_to_zero_based(chain_index, "chain_index")
-    result = ableton.send_command(
-        "get_chain_info", {"track_index": ti, "device_index": di, "chain_index": ci}
-    )
+    wire = _path_target(device_path, chain_index, allow_chain_end=True)
+    if wire is not None:
+        drill = wire[-1][0] != DEVICE
+        result = ableton.send_command("get_chain_info", path_request(ti, wire))
+    else:
+        di = to_zero_based(device_index, "device_index")
+        ci = optional_to_zero_based(chain_index, "chain_index")
+        drill = chain_index > 0
+        result = ableton.send_command(
+            "get_chain_info", {"track_index": ti, "device_index": di, "chain_index": ci}
+        )
 
-    if chain_index > 0:
+    if drill:
         devices = result.get("devices", [])
         lines = [f"Chain '{result.get('chain_name', '?')}' — {len(devices)} devices", ""]
         for d in devices:
