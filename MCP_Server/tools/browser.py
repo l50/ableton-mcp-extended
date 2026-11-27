@@ -248,3 +248,32 @@ def load_external_plugin(
             f"(matched '{plugin_name}')."
         )
     return f"Failed to load external plugin '{chosen.get('name', '?')}'."
+
+
+@ableton_tool("loading device from path")
+def load_device_from_path(ctx: Context, track_index: int, path: str) -> str:
+    """Load a device, preset or rack from a file path in Live's browser.
+
+    Walks the browser by name, so it reaches files that have no usable browser
+    URI, such as a Max for Live device (.amxd), a device preset (.adv) or a
+    rack (.adg) saved in the User Library.
+
+    Parameters:
+    - track_index: Track number (1-based).
+    - path: Slash-separated path to the file, relative to the User Library,
+      e.g. 'Presets/MIDI Effects/Max MIDI Effect/My Device.amxd'. Start with
+      'Current Project', 'Packs' or the name of a folder added to Live's Places
+      to look there instead. The extension may be left off when unambiguous.
+    """
+    if not path or not path.strip():
+        return "Error: path is required."
+    result = connection.get_ableton_connection().send_command(
+        "load_device_from_path",
+        {"track_index": to_zero_based(track_index, "track_index"), "path": path},
+    )
+    if not result.get("loaded", False):
+        return f"Failed to load '{path}' onto track {track_index}."
+    return (
+        f"Loaded '{result.get('item_name', path)}' onto track {track_index} as device "
+        f"'{result.get('device_name', '?')}' (device {result.get('device_index', 0) + 1})."
+    )
