@@ -30,7 +30,6 @@ MAIN_THREAD_COMMANDS = (
     "create_cue_point", "delete_cue_point",
     "create_arrangement_clip", "create_arrangement_audio_clip",
     "duplicate_to_arrangement", "delete_arrangement_clip",
-    "delete_take_lane_clip", "delete_take_lane",
     "set_arrangement_clip_property",
     "copy_arrangement_audio_region", "move_arrangement_clip",
     "set_view", "control_arrangement_view",
@@ -360,10 +359,6 @@ class AbletonMCP(ControlSurface):
                             ci = params.get("clip_index", 0)
                             dt = params.get("destination_time", 0.0)
                             result = self._duplicate_to_arrangement(ti, ci, dt)
-                        elif command_type == "delete_take_lane_clip":
-                            result = self._delete_take_lane_clip(params)
-                        elif command_type == "delete_take_lane":
-                            result = self._delete_take_lane(params)
                         elif command_type == "delete_arrangement_clip":
                             ti = params.get("track_index", 0)
                             ci = params.get("clip_index", None)
@@ -2288,15 +2283,6 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error adding notes to arrangement clip: " + str(e))
             raise
 
-    def _take_lane_index(self, params, field, count):
-        """Require an explicit in-range 0-based index; never default to item 0."""
-        index = params.get(field)
-        if isinstance(index, bool) or not isinstance(index, int):
-            raise ValueError("{0} must be an explicit integer".format(field))
-        if index < 0 or index >= count:
-            raise IndexError("{0} is out of range".format(field))
-        return index
-
     def _take_lane_track(self, params):
         track = self._resolve_track(params)
         if not hasattr(track, "take_lanes"):
@@ -2316,34 +2302,6 @@ class AbletonMCP(ControlSurface):
                      "clips": [self._take_lane_clip_info(clip, j)
                                for j, clip in enumerate(lane.arrangement_clips)]}
                     for i, lane in enumerate(track.take_lanes)]}
-
-    def _delete_take_lane_clip(self, params):
-        track = self._take_lane_track(params)
-        lane_index = self._take_lane_index(params, "lane_index", len(track.take_lanes))
-        lane = track.take_lanes[lane_index]
-        clips = list(lane.arrangement_clips)
-        clip_index = self._take_lane_index(params, "clip_index", len(clips))
-        clip = clips[clip_index]
-        # Fail closed if a malformed lane exposes a main-lane clip.
-        if clip in track.arrangement_clips:
-            raise ValueError("Refusing to delete a main-lane clip")
-        deleted = self._take_lane_clip_info(clip, clip_index)
-        track.delete_clip(clip)
-        return {"lane_index": lane_index, "deleted_clip": deleted}
-
-    def _delete_take_lane(self, params):
-        track = self._take_lane_track(params)
-        lane_index = self._take_lane_index(params, "lane_index", len(track.take_lanes))
-        lane = track.take_lanes[lane_index]
-        if list(lane.arrangement_clips):
-            raise ValueError("Take lane is not empty; delete its clips explicitly first")
-        delete = getattr(track, "delete_take_lane", None)
-        if not callable(delete):
-            raise RuntimeError("this Live version offers no way to delete a take lane")
-        # Capability and signature must be confirmed in the authorized Live window.
-        name = lane.name
-        delete(lane_index)
-        return {"lane_index": lane_index, "name": name}
 
     def _delete_arrangement_clip(self, track_index, clip_index=None, clip_name=None):
         """Delete an arrangement clip."""

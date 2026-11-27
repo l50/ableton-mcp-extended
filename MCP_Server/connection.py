@@ -48,8 +48,6 @@ MODIFYING_COMMANDS = (
     "create_arrangement_audio_clip",
     "duplicate_to_arrangement",
     "delete_arrangement_clip",
-    "delete_take_lane_clip",
-    "delete_take_lane",
     "set_arrangement_clip_property",
     "copy_arrangement_audio_region",
     "move_arrangement_clip",
