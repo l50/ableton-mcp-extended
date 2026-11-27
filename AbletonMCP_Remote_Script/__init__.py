@@ -2144,11 +2144,12 @@ class AbletonMCP(ControlSurface):
                 "start": self._song.loop_start if start is None else start,
                 "length": self._song.loop_length if length is None else length,
             }
-            self._song.loop = enabled
+            # Region first: if Live refuses it, the loop switch is left as it was.
             if start is not None:
                 self._song.loop_start = start
             if length is not None:
                 self._song.loop_length = length
+            self._song.loop = enabled
             return requested
         except Exception as e:
             self.log_message("Error setting arrangement loop: " + str(e))
@@ -2159,8 +2160,24 @@ class AbletonMCP(ControlSurface):
 
         A stepped handler (see _run_steps). The reply is the loop as Live
         shows it on the next tick, plus the values that were requested.
+        Live refuses a loop start whose end, at the current loop length, would
+        run past the song's end, so a move that also shortens the loop sets
+        the length first and lets Live apply it before setting the start.
         """
-        requested = self._set_arrangement_loop(enabled, start, length)
+        try:
+            shrink_first = start is not None and length is not None and \
+                length < self._song.loop_length
+            if shrink_first:
+                self._song.loop_length = length
+        except Exception as e:
+            self.log_message("Error setting arrangement loop: " + str(e))
+            raise
+        if shrink_first:
+            yield
+            requested = self._set_arrangement_loop(enabled, start, None)
+            requested["length"] = length
+        else:
+            requested = self._set_arrangement_loop(enabled, start, length)
         yield
         try:
             return {

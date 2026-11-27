@@ -45,6 +45,10 @@ def _late_song_setting(name):
         return self._applied[name]
 
     def set(self, value):
+        # Live checks a new loop start against the loop length it has applied.
+        if name == "loop_start" and self.song_length is not None and \
+                value + self._applied["loop_length"] > self.song_length:
+            raise RuntimeError("Cannot set the Loopstart behind the Songlength")
         self._pending[name] = value
 
     return property(get, set)
@@ -57,10 +61,12 @@ class LateSong:
     loop_start = _late_song_setting("loop_start")
     loop_length = _late_song_setting("loop_length")
 
-    def __init__(self, loop=False, loop_start=0.0, loop_length=16.0, max_length=None):
+    def __init__(self, loop=False, loop_start=0.0, loop_length=16.0, max_length=None,
+                 song_length=None):
         self._applied = {"loop": loop, "loop_start": loop_start, "loop_length": loop_length}
         self._pending = {}
         self.max_length = max_length
+        self.song_length = song_length
         self.tracks = []
 
     def commit(self):
@@ -336,6 +342,31 @@ class TestLoopReadback:
         response = self._send(song, {"enabled": True, "start": 0.0, "length": 4.0})
         assert (response["result"]["start"], response["result"]["length"]) == (0.0, 4.0)
 
+    def test_move_that_shortens_the_loop_fits_inside_the_song(self):
+        song = LateSong(loop=False, loop_start=0.0, loop_length=480.0, song_length=512.0)
+        response = self._send(song, {"enabled": False, "start": 280.0, "length": 56.0})
+        assert response["status"] == "success", response
+        assert (response["result"]["start"], response["result"]["length"]) == (280.0, 56.0)
+        assert response["result"]["requested"] == {"enabled": False, "start": 280.0,
+                                                   "length": 56.0}
+
+    def test_refused_region_leaves_the_loop_switch_alone(self):
+        song = LateSong(loop=False, loop_start=0.0, loop_length=480.0, song_length=512.0)
+        response = self._send(song, {"enabled": True, "start": 400.0})
+        assert response["status"] == "error"
+        assert "behind the Songlength" in response["message"]
+        assert song.loop is False
+
+    def test_shrink_error_is_logged_and_reported(self):
+        song = LateSong(loop_length=16.0)
+        song._applied.pop("loop_length")
+        script = make_script(song)
+        script.schedule_message = committing_schedule(song)
+        response = script._process_command({"type": "set_arrangement_loop", "params": {
+            "enabled": True, "start": 0.0, "length": 4.0}})
+        assert response["status"] == "error"
+        script.log_message.assert_called()
+
     def test_reply_shows_what_live_applied_when_it_differs(self):
         song = LateSong(loop=False, max_length=12.0)
         response = self._send(song, {"enabled": True, "start": 8.0, "length": 64.0})
@@ -346,14 +377,15 @@ class TestLoopReadback:
         song = LateSong()
         script = make_script(song)
 
-        def explode(_delay, fn):
-            song._applied = {}
+        def explode_on_read_back(delay, fn):
+            if delay == 1:
+                song._applied = {}
             fn()
-        script.schedule_message = MagicMock(side_effect=explode)
+        script.schedule_message = MagicMock(side_effect=explode_on_read_back)
         response = script._process_command({"type": "set_arrangement_loop",
                                             "params": {"enabled": True}})
         assert response["status"] == "error"
-        script.log_message.assert_called()
+        assert any("reading back" in c.args[0] for c in script.log_message.call_args_list)
 
 
 # ── #23 clip info reports markers ────────────────────────────────────
