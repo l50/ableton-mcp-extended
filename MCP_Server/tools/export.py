@@ -19,6 +19,7 @@ from mcp.server.fastmcp import Context
 from MCP_Server import connection, live_export
 from MCP_Server.app import mcp
 from MCP_Server.conversions import ALL_TRACKS
+from MCP_Server.tools.ui_state import armed_tracks_reader
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +87,7 @@ def _run_live_export(
     try:
         request.validate()
         live_export.check_preconditions(request)
-        exporter = live_export.LiveExporter()
+        exporter = live_export.LiveExporter(armed_reader=armed_tracks_reader)
         # Before the loop brace is touched: Live must not be in an earlier
         # export, and must have an audio device to render through.
         exporter.preflight()
