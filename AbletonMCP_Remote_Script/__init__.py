@@ -36,6 +36,8 @@ MAIN_THREAD_COMMANDS = (
     "set_view", "control_arrangement_view",
     "manage_clip_automation",
     "add_notes_to_arrangement_clip",
+    "remove_arrangement_clip_notes", "set_arrangement_clip_bounds",
+    "set_arrangement_clip_end", "split_arrangement_clip",
     "set_device_parameter", "set_device_enabled",
     "delete_device", "navigate_preset",
     "delete_track",
@@ -334,7 +336,10 @@ class AbletonMCP(ControlSurface):
                             enabled = params.get("enabled", True)
                             start = params.get("start", None)
                             length = params.get("length", None)
-                            result = self._set_arrangement_loop(enabled, start, length)
+                            self._run_steps(
+                                self._set_arrangement_loop_steps(enabled, start, length),
+                                response_queue)
+                            return
                         elif command_type == "jump_to_cue":
                             direction = params.get("direction", None)
                             name = params.get("name", None)
@@ -401,6 +406,22 @@ class AbletonMCP(ControlSurface):
                             ci = params.get("clip_index", 0)
                             notes = params.get("notes", [])
                             result = self._add_notes_to_arrangement_clip(ti, ci, notes)
+                        elif command_type == "remove_arrangement_clip_notes":
+                            self._run_steps(self._remove_arrangement_clip_notes(params),
+                                            response_queue)
+                            return
+                        elif command_type == "set_arrangement_clip_bounds":
+                            self._run_steps(self._set_arrangement_clip_bounds(params),
+                                            response_queue)
+                            return
+                        elif command_type == "set_arrangement_clip_end":
+                            self._run_steps(self._set_arrangement_clip_end(params),
+                                            response_queue)
+                            return
+                        elif command_type == "split_arrangement_clip":
+                            self._run_steps(self._split_arrangement_clip(params),
+                                            response_queue)
+                            return
                         # Device modifying commands
                         elif command_type == "set_device_parameter":
                             ti = params.get("track_index", 0)
@@ -509,6 +530,8 @@ class AbletonMCP(ControlSurface):
                 response["result"] = self._get_arrangement_info(track_index)
             elif command_type == "get_cue_points":
                 response["result"] = self._get_cue_points()
+            elif command_type == "get_arrangement_clip_notes":
+                response["result"] = self._get_arrangement_clip_notes(params)
             # Device read-only commands
             elif command_type == "get_device_parameters":
                 ti = params.get("track_index", 0)
@@ -561,6 +584,8 @@ class AbletonMCP(ControlSurface):
                 "looping": clip.looping,
                 "loop_start": clip.loop_start,
                 "loop_end": clip.loop_end,
+                "start_marker": self._safe_attr(clip, "start_marker"),
+                "end_marker": self._safe_attr(clip, "end_marker"),
             }
             if clip.is_audio_clip:
                 info["file_path"] = clip.file_path
@@ -2290,20 +2315,62 @@ class AbletonMCP(ControlSurface):
             raise
 
     def _set_arrangement_loop(self, enabled, start=None, length=None):
-        """Set arrangement loop state and region."""
+        """Set arrangement loop state and region; return what was asked.
+
+        Live applies these Song writes when the current main-thread tick
+        ends, so reading them back here would still give the previous state.
+        A setting that is not given is reported as it stands.
+        """
         try:
-            self._song.loop = enabled
+            requested = {
+                "enabled": bool(enabled),
+                "start": self._song.loop_start if start is None else start,
+                "length": self._song.loop_length if length is None else length,
+            }
+            # Region first: if Live refuses it, the loop switch is left as it was.
             if start is not None:
                 self._song.loop_start = start
             if length is not None:
                 self._song.loop_length = length
-            return {
-                "enabled": self._song.loop,
-                "start": self._song.loop_start,
-                "length": self._song.loop_length,
-            }
+            self._song.loop = enabled
+            return requested
         except Exception as e:
             self.log_message("Error setting arrangement loop: " + str(e))
+            raise
+
+    def _set_arrangement_loop_steps(self, enabled, start=None, length=None):
+        """Set the arrangement loop, then read it back once Live has applied it.
+
+        A stepped handler (see _run_steps). The reply is the loop as Live
+        shows it on the next tick, plus the values that were requested.
+        Live refuses a loop start whose end, at the current loop length, would
+        run past the song's end, so a move that also shortens the loop sets
+        the length first and lets Live apply it before setting the start.
+        """
+        try:
+            shrink_first = start is not None and length is not None and \
+                length < self._song.loop_length
+            if shrink_first:
+                self._song.loop_length = length
+        except Exception as e:
+            self.log_message("Error setting arrangement loop: " + str(e))
+            raise
+        if shrink_first:
+            yield
+            requested = self._set_arrangement_loop(enabled, start, None)
+            requested["length"] = length
+        else:
+            requested = self._set_arrangement_loop(enabled, start, length)
+        yield
+        try:
+            return {
+                "enabled": bool(self._song.loop),
+                "start": self._song.loop_start,
+                "length": self._song.loop_length,
+                "requested": requested,
+            }
+        except Exception as e:
+            self.log_message("Error reading back arrangement loop: " + str(e))
             raise
 
     def _jump_to_cue(self, direction=None, name=None):
@@ -2829,6 +2896,484 @@ class AbletonMCP(ControlSurface):
                     "value": getattr(clip, property_name)}
         except Exception as e:
             self.log_message("Error setting arrangement clip property: " + str(e))
+            raise
+
+    # Arrangement clip notes, trim and split.
+    #
+    # Live's API has no call that splits an arrangement clip or sets its end:
+    # start_time and end_time are read-only. What it does have is the way a
+    # duplicate lands: a clip duplicated onto part of another clip cuts that
+    # part out, as pasting does, and the clip it cut keeps playing the rest as
+    # before. A split builds the right-hand piece past the end of the track,
+    # from a copy whose left part a second copy cuts away, then duplicates the
+    # piece to the split point, where it cuts the original. Shortening a clip
+    # is a split whose right-hand piece is then deleted. Until the result has
+    # been checked, a verified backup copy waits past the end of the track,
+    # and it is put back in the clip's place if the check fails.
+
+    # Most note events a clip check will enumerate before refusing; a tiny
+    # loop repeated across a long clip would otherwise run unbounded.
+    MAX_NOTE_EVENTS = 100000
+
+    @staticmethod
+    def _require_midi_clip(clip):
+        if not clip.is_midi_clip:
+            raise ValueError("Clip '{0}' is an audio clip; notes need a MIDI clip".format(
+                clip.name))
+
+    @staticmethod
+    def _note_fields(note):
+        """Pitch, start, duration, velocity and mute of a Live note (object or dict)."""
+        if isinstance(note, dict):
+            value = note.get
+        else:
+            value = lambda key: getattr(note, key, None)
+        return {"pitch": value("pitch"), "start_time": value("start_time"),
+                "duration": value("duration"), "velocity": value("velocity"),
+                "mute": bool(value("mute"))}
+
+    @staticmethod
+    def _clip_note_window(clip, start=None, end=None):
+        """The clip-time range [low, high) to read or remove notes in.
+
+        By default it is the part of the clip that plays: from loop start to
+        loop end for an unlooped clip (Live's clip start and end), and from
+        the earlier of start marker and loop start to loop end for a looped
+        one.
+        """
+        if clip.looping:
+            low, high = min(clip.start_marker, clip.loop_start), clip.loop_end
+        else:
+            low, high = clip.loop_start, clip.loop_end
+        low = low if start is None else float(start)
+        high = high if end is None else float(end)
+        if high <= low:
+            raise ValueError("Note range end {0} must be after its start {1}".format(high, low))
+        return low, high
+
+    def _clip_notes(self, clip, low, high, from_pitch=0, pitch_span=128):
+        """Notes starting in [low, high) of clip time, sorted by start then pitch."""
+        notes = [self._note_fields(note)
+                 for note in clip.get_notes_extended(from_pitch, pitch_span, low, high - low)]
+        notes.sort(key=lambda note: (note["start_time"], note["pitch"]))
+        return notes
+
+    @staticmethod
+    def _clip_segments(clip):
+        """The clip-time segments an arrangement clip plays, in order.
+
+        Each item is (song_start, clip_from, clip_to): clip time clip_from
+        plays at song beat song_start, which is always before the clip's end. An unlooped clip plays loop start to
+        loop end once; a looped clip plays from its start marker to its loop
+        end, then its loop over and over until its right edge.
+        """
+        start, end = clip.start_time, clip.end_time
+        if not clip.looping:
+            yield start, clip.loop_start, clip.loop_end
+            return
+        loop_start, loop_end = clip.loop_start, clip.loop_end
+        loop_length = loop_end - loop_start
+        if loop_length <= 0:
+            return
+        first = clip.start_marker if clip.start_marker < loop_end else loop_start
+        yield start, first, loop_end
+        song = start + (loop_end - first)
+        while song < end:
+            yield song, loop_start, loop_end
+            song += loop_length
+
+    def _first_song_time(self, clip, time):
+        """The song beat where clip time *time* first plays, or None if it never does."""
+        end = clip.end_time
+        for song, clip_from, clip_to in self._clip_segments(clip):
+            if clip_from <= time < clip_to:
+                when = song + (time - clip_from)
+                return when if when < end else None
+        return None
+
+    def _note_events(self, clip):
+        """Every note a MIDI clip plays, as (song beat, pitch, duration, velocity, mute)."""
+        notes = self._clip_notes(clip, -MAX_ARRANGEMENT_TIME, 2 * MAX_ARRANGEMENT_TIME)
+        end = clip.end_time
+        events = []
+        for song, clip_from, clip_to in self._clip_segments(clip):
+            for note in notes:
+                when = song + (note["start_time"] - clip_from)
+                if clip_from <= note["start_time"] < clip_to and when < end:
+                    events.append((round(when, 6), note["pitch"], round(note["duration"], 6),
+                                   round(float(note["velocity"]), 6), note["mute"]))
+            if len(events) > self.MAX_NOTE_EVENTS:
+                raise ValueError("Clip '{0}' plays more than {1} notes; too many to "
+                                 "verify".format(clip.name, self.MAX_NOTE_EVENTS))
+        return sorted(events)
+
+    def _clip_reply(self, track, clip):
+        """A clip's info, with its current index on the track."""
+        info = self._audio_clip_info(clip)
+        info["index"] = next(
+            (i for i, c in enumerate(track.arrangement_clips) if c == clip), None)
+        return info
+
+    def _get_arrangement_clip_notes(self, params):
+        """Read the notes of an arrangement MIDI clip.
+
+        Each note gives its start in clip beats and the song beat where it
+        first plays (None when it never plays, e.g. hidden past the end).
+        """
+        try:
+            track, clip = self._resolve_arrangement_clip(
+                params.get("track_index", 0), params.get("clip_index"), params.get("clip_name"))
+            self._require_midi_clip(clip)
+            low, high = self._clip_note_window(clip, params.get("start"), params.get("end"))
+            notes = self._clip_notes(clip, low, high)
+            for note in notes:
+                note["song_time"] = self._first_song_time(clip, note["start_time"])
+            return {
+                "track": track.name,
+                "clip": self._clip_reply(track, clip),
+                "range_start": low,
+                "range_end": high,
+                "note_count": len(notes),
+                "notes": notes,
+            }
+        except Exception as e:
+            self.log_message("Error reading arrangement clip notes: " + str(e))
+            raise
+
+    def _remove_arrangement_clip_notes(self, params):
+        """Remove the notes that start in a clip-time range, optionally of one pitch.
+
+        A stepped handler (see _run_steps): after Live has applied the removal
+        the range is read again, and any note still there is an error.
+        """
+        try:
+            track, clip = self._resolve_arrangement_clip(
+                params.get("track_index", 0), params.get("clip_index"), params.get("clip_name"))
+            self._require_midi_clip(clip)
+            low, high = self._clip_note_window(clip, params.get("start"), params.get("end"))
+            pitch = params.get("pitch")
+            from_pitch, pitch_span = (int(pitch), 1) if pitch is not None else (0, 128)
+            removed = self._clip_notes(clip, low, high, from_pitch, pitch_span)
+            clip.remove_notes_extended(from_pitch, pitch_span, low, high - low)
+            yield
+            left = self._clip_notes(clip, low, high, from_pitch, pitch_span)
+            if left:
+                raise RuntimeError("Live left {0} note(s) starting in {1}-{2}".format(
+                    len(left), low, high))
+            remaining = self._clip_notes(clip, -MAX_ARRANGEMENT_TIME, 2 * MAX_ARRANGEMENT_TIME)
+            return {
+                "track": track.name,
+                "clip": self._clip_reply(track, clip),
+                "range_start": low,
+                "range_end": high,
+                "pitch": pitch,
+                "removed": len(removed),
+                "removed_notes": removed,
+                "remaining": len(remaining),
+            }
+        except Exception as e:
+            self.log_message("Error removing arrangement clip notes: " + str(e))
+            raise
+
+    @staticmethod
+    def _set_range(clip, low_name, high_name, low, high):
+        """Set a clip's start/end pair in an order Live accepts (start never after end)."""
+        if low >= getattr(clip, high_name):
+            setattr(clip, high_name, high)
+            setattr(clip, low_name, low)
+        else:
+            setattr(clip, low_name, low)
+            setattr(clip, high_name, high)
+
+    def _put_window_back(self, clip, snapshot):
+        self._set_range(clip, "loop_start", "loop_end",
+                        snapshot["loop_start"], snapshot["loop_end"])
+        self._set_range(clip, "start_marker", "end_marker",
+                        snapshot["start_marker"], snapshot["end_marker"])
+
+    def _set_arrangement_clip_bounds(self, params):
+        """Set an arrangement clip's start and/or end marker, keeping its loop state.
+
+        A stepped handler (see _run_steps). A looped clip keeps its looping,
+        loop start and loop end; only its markers move. An unlooped clip plays
+        from its loop start to its loop end, so those move with the markers.
+        If Live changes anything else, the clip is put back and it is an error.
+        """
+        try:
+            track, clip = self._resolve_arrangement_clip(
+                params.get("track_index", 0), params.get("clip_index"), params.get("clip_name"))
+            start_marker, end_marker = params.get("start_marker"), params.get("end_marker")
+            if start_marker is None and end_marker is None:
+                raise ValueError("Give start_marker, end_marker or both")
+            before = self._clip_snapshot(clip)
+            new_start = before["start_marker"] if start_marker is None else float(start_marker)
+            new_end = before["end_marker"] if end_marker is None else float(end_marker)
+            if new_end <= new_start:
+                raise ValueError("End marker {0} must be after start marker {1}".format(
+                    new_end, new_start))
+            expected = {"looping": before["looping"], "start_marker": new_start,
+                        "end_marker": new_end}
+            self._set_range(clip, "start_marker", "end_marker", new_start, new_end)
+            if before["looping"]:
+                expected.update(loop_start=before["loop_start"], loop_end=before["loop_end"])
+            else:
+                self._set_range(clip, "loop_start", "loop_end", new_start, new_end)
+                expected.update(loop_start=new_start, loop_end=new_end)
+            yield
+            wrong = self._snapshot_mismatches(expected, self._clip_snapshot(clip),
+                                              sorted(expected))
+            if wrong:
+                self._put_window_back(clip, before)
+                yield
+                raise RuntimeError("Live did not set the markers as asked, so the clip's "
+                                   "markers and loop were put back: " + "; ".join(wrong))
+            return {
+                "track": track.name,
+                "clip": self._clip_reply(track, clip),
+                "previous": {key: before[key] for key in
+                             ("start_marker", "end_marker", "loop_start", "loop_end")},
+                "previous_end_time": before["length"] + clip.start_time,
+            }
+        except Exception as e:
+            self.log_message("Error setting arrangement clip bounds: " + str(e))
+            raise
+
+    @staticmethod
+    def _clip_at(track, time, exclude=()):
+        """The arrangement clip on *track* that starts at *time*."""
+        for clip in track.arrangement_clips:
+            if abs(clip.start_time - time) <= CLIP_TIME_TOLERANCE and \
+                    not any(clip == other for other in exclude):
+                return clip
+        raise RuntimeError("No clip starts at beat {0} on track '{1}'".format(time, track.name))
+
+    @staticmethod
+    def _units_per_beat(clip):
+        """Clip-time units per song beat: seconds for unwarped audio, else beats."""
+        if clip.is_audio_clip and not clip.warping:
+            return (clip.loop_end - clip.loop_start) / (clip.end_time - clip.start_time)
+        return 1.0
+
+    def _clip_time_at(self, clip, beat):
+        """The clip time that plays at song beat *beat* inside the clip."""
+        units = self._units_per_beat(clip)
+        for song, clip_from, clip_to in self._clip_segments(clip):
+            span = (clip_to - clip_from) / units
+            if song <= beat < song + span:
+                return clip_from + (beat - song) * units
+        raise ValueError("Beat {0} is not inside clip '{1}'".format(beat, clip.name))
+
+    def _delete_if_present(self, track, clip):
+        if clip is not None and any(c == clip for c in track.arrangement_clips):
+            track.delete_clip(clip)
+
+    def _split_steps(self, track, clip, beat):
+        """Split *clip* at song beat *beat*; a step generator returning (left, right).
+
+        Raises, with the original put back from the backup copy, if Live's
+        result differs from the original anywhere except where it was cut.
+        """
+        start, end = clip.start_time, clip.end_time
+        if not start + CLIP_TIME_TOLERANCE < beat < end - CLIP_TIME_TOLERANCE:
+            raise ValueError("Beat {0} is not inside clip '{1}' (beats {2}-{3})".format(
+                beat, clip.name, start, end))
+        length = end - start
+        cut = beat - start
+        before = self._clip_snapshot(clip)
+        right_start_marker = self._clip_time_at(clip, beat)
+        events = self._note_events(clip) if clip.is_midi_clip else None
+        backup_at = self._staging_time(track, end)
+        # The right-hand piece is built at piece_at; the copy that cuts its left
+        # part off sits just before it, so leave a clip's length free there.
+        piece_at = backup_at + length + STAGING_GAP_BEATS + length
+        self._check_arrangement_range(piece_at, length)
+
+        backup, _ = yield from self._verified_duplicate(track, clip, before, backup_at, length)
+        copy = cutter = piece = None
+        placed = False
+        try:
+            copy, _ = yield from self._verified_duplicate(track, clip, before, piece_at, length)
+            cutter, _ = self._duplicate_arrangement_clip(track, clip, piece_at + cut - length,
+                                                         length)
+            yield
+            track.delete_clip(cutter)
+            cutter = None
+            yield
+            piece = self._clip_at(track, piece_at + cut)
+            placed = True
+            right, _ = self._duplicate_arrangement_clip(track, piece, beat, end - beat)
+            yield
+            track.delete_clip(piece)
+            piece = None
+            yield
+            left = self._clip_at(track, start)
+            right = self._clip_at(track, beat)
+            wrong = self._split_mismatches(track, before, events, left, right, start, beat, end,
+                                           right_start_marker)
+            if wrong:
+                raise RuntimeError("Live's split differs from the original: " + "; ".join(wrong))
+        except Exception as e:
+            for leftover in (copy, cutter, piece):
+                self._delete_if_present(track, leftover)
+            if not placed:
+                # Nothing has touched the original yet; only the backup goes.
+                track.delete_clip(backup)
+                yield
+                raise RuntimeError("{0}. The original clip was not changed".format(e))
+            restored = yield from self._restore_from_backup(track, backup, before, start, end)
+            raise RuntimeError("{0}. {1}".format(e, restored))
+        track.delete_clip(backup)
+        yield
+        return left, right
+
+    def _split_mismatches(self, track, before, events, left, right, start, beat, end,
+                          right_start_marker):
+        """What differs between the two pieces and the original clip they came from."""
+        wrong = []
+        between = [c for c in track.arrangement_clips
+                   if c.start_time < end - CLIP_TIME_TOLERANCE and
+                   c.end_time > start + CLIP_TIME_TOLERANCE and c != left and c != right]
+        if between:
+            wrong.append("{0} other clip(s) inside the original's range".format(len(between)))
+        same = ["name", "is_audio", "muted", "color", "looping"]
+        if before["is_audio"]:
+            same += list(AUDIO_CLIP_PROPERTIES)
+        left_expected = dict(before, length=beat - start)
+        right_expected = dict(before, length=end - beat)
+        left_keys = same + ["length", "start_marker"]
+        right_keys = same + ["length"]
+        if before["looping"]:
+            left_keys += ["loop_start", "loop_end"]
+            right_keys += ["loop_start", "loop_end"]
+        else:
+            left_keys += ["loop_start"]
+            right_keys += ["loop_end"]
+        if before["is_audio"]:
+            right_expected["start_marker"] = right_start_marker
+            right_keys.append("start_marker")
+        if not self._length_comparable(before):
+            left_keys.remove("length")
+            right_keys.remove("length")
+        wrong += ["left " + w for w in self._snapshot_mismatches(
+            left_expected, self._clip_snapshot(left), left_keys)]
+        wrong += ["right " + w for w in self._snapshot_mismatches(
+            right_expected, self._clip_snapshot(right), right_keys)]
+        for name, clip, edge, expected_edge in (("left", left, left.end_time, beat),
+                                                ("right", right, right.end_time, end)):
+            if abs(edge - expected_edge) > CLIP_TIME_TOLERANCE:
+                wrong.append("{0} ends at beat {1}, not {2}".format(name, edge, expected_edge))
+        if events is not None:
+            pieces = sorted(self._note_events(left) + self._note_events(right))
+            if pieces != events:
+                wrong.append("the pieces play {0} note(s) where the original played {1} "
+                             "(or at other times)".format(len(pieces), len(events)))
+        return wrong
+
+    def _restore_from_backup(self, track, backup, before, start, end):
+        """Put the backup copy back in the original's place; a step generator.
+
+        Returns a sentence saying what was done, for the error message.
+        """
+        try:
+            for clip in list(track.arrangement_clips):
+                if clip != backup and clip.start_time < end - CLIP_TIME_TOLERANCE and \
+                        clip.end_time > start + CLIP_TIME_TOLERANCE:
+                    track.delete_clip(clip)
+            yield
+            yield from self._verified_duplicate(track, backup, before, start, end - start)
+            track.delete_clip(backup)
+            yield
+            return "The original clip was put back at beat {0}".format(start)
+        except Exception as e:
+            return ("Putting the original back failed ({0}); an intact copy is kept at beat {1} "
+                    "on track '{2}'".format(e, backup.start_time, track.name))
+
+    @staticmethod
+    def _required_beat(params, name):
+        value = params.get(name)
+        if value is None:
+            raise ValueError("Give {0}, in song beats".format(name))
+        return float(value)
+
+    def _split_arrangement_clip(self, params):
+        """Split an arrangement clip (MIDI or audio) at a song beat.
+
+        A stepped handler (see _run_steps); the reply holds both pieces.
+        """
+        try:
+            track, clip = self._resolve_arrangement_clip(
+                params.get("track_index", 0), params.get("clip_index"), params.get("clip_name"))
+            beat = self._required_beat(params, "beat")
+            original = {"start_time": clip.start_time, "end_time": clip.end_time}
+            left, right = yield from self._split_steps(track, clip, beat)
+            return {
+                "track": track.name,
+                "split_at": beat,
+                "original": original,
+                "left": self._clip_reply(track, left),
+                "right": self._clip_reply(track, right),
+            }
+        except Exception as e:
+            self.log_message("Error splitting arrangement clip: " + str(e))
+            raise
+
+    def _set_arrangement_clip_end(self, params):
+        """Move an arrangement clip's right edge to a song beat, keeping its loop state.
+
+        A stepped handler (see _run_steps). Shortening splits the clip at the
+        new end and deletes the right-hand piece, so a looped clip keeps its
+        loop exactly. Lengthening works for an unlooped clip, by moving its
+        loop end and end marker; Live's API has no call that lengthens a
+        looped arrangement clip, so that is refused.
+        """
+        try:
+            track, clip = self._resolve_arrangement_clip(
+                params.get("track_index", 0), params.get("clip_index"), params.get("clip_name"))
+            end_beat = self._required_beat(params, "end_beat")
+            start, end = clip.start_time, clip.end_time
+            if end_beat <= start + CLIP_TIME_TOLERANCE:
+                raise ValueError("End beat {0} must be after the clip's start (beat {1})".format(
+                    end_beat, start))
+            reply = {"track": track.name, "previous_end_time": end}
+            if abs(end_beat - end) <= CLIP_TIME_TOLERANCE:
+                reply.update(clip=self._clip_reply(track, clip), method="unchanged")
+                return reply
+            if end_beat < end:
+                left, right = yield from self._split_steps(track, clip, end_beat)
+                track.delete_clip(right)
+                yield
+                reply.update(clip=self._clip_reply(track, left), method="split")
+                return reply
+            if clip.looping:
+                raise ValueError(
+                    "Clip '{0}' is looped: Live's API has no call that lengthens a looped "
+                    "arrangement clip, and its loop and markers do not set its length. Only "
+                    "shortening keeps a looped clip's loop".format(clip.name))
+            blocking = [c.name or "(unnamed)" for c in track.arrangement_clips
+                        if c != clip and c.start_time < end_beat - CLIP_TIME_TOLERANCE and
+                        c.end_time > end + CLIP_TIME_TOLERANCE]
+            if blocking:
+                raise ValueError("Lengthening clip '{0}' to beat {1} would run into {2}".format(
+                    clip.name, end_beat, ", ".join(blocking)))
+            before = self._clip_snapshot(clip)
+            new_end = clip.loop_end + (end_beat - end) * self._units_per_beat(clip)
+            self._set_range(clip, "loop_start", "loop_end", clip.loop_start, new_end)
+            self._set_range(clip, "start_marker", "end_marker", clip.start_marker, new_end)
+            yield
+            after = self._clip_snapshot(clip)
+            wrong = self._snapshot_mismatches(before, after, ["looping", "loop_start",
+                                                              "start_marker"])
+            if abs(clip.end_time - end_beat) > CLIP_TIME_TOLERANCE:
+                wrong.append("end: expected beat {0}, got {1}".format(end_beat, clip.end_time))
+            if wrong:
+                self._put_window_back(clip, before)
+                yield
+                raise RuntimeError("Live did not lengthen the clip as asked, so it was put "
+                                   "back: " + "; ".join(wrong))
+            reply.update(clip=self._clip_reply(track, clip), method="markers")
+            return reply
+        except Exception as e:
+            self.log_message("Error setting arrangement clip end: " + str(e))
             raise
 
     def _set_view(self, view_name):
