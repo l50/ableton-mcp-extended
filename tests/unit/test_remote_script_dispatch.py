@@ -87,8 +87,6 @@ WRITE_COMMANDS = [
     ("load_browser_item", {"track_index": 1, "item_uri": "uri"}, "_load_browser_item",
      (1, "uri")),
     ("set_song_time", {"time": 4.0}, "_set_song_time", (4.0,)),
-    ("set_arrangement_loop", {"enabled": False, "start": 1.0, "length": 2.0},
-     "_set_arrangement_loop", (False, 1.0, 2.0)),
     ("jump_to_cue", {"direction": "next"}, "_jump_to_cue", ("next", None)),
     ("create_cue_point", {"time": 4.0, "name": "Drop"}, "_create_cue_point", (4.0, "Drop")),
     ("delete_cue_point", {"time": 4.0}, "_delete_cue_point", (4.0,)),

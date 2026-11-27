@@ -195,7 +195,8 @@ class TestSerializers:
         info = make_script()._get_arrangement_clip_info(clip)
         assert info == {"name": "Intro", "start_time": 4.0, "end_time": 12.0, "length": 8.0,
                         "is_midi": True, "is_audio": False, "muted": False, "color": 0,
-                        "looping": True, "loop_start": 0.0, "loop_end": 8.0}
+                        "looping": True, "loop_start": 0.0, "loop_end": 8.0,
+                        "start_marker": None, "end_marker": None}
 
     def test_arrangement_clip_info_error(self):
         info = make_script()._get_arrangement_clip_info(Exploding())

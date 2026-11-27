@@ -44,6 +44,33 @@ def _bar_range(start: float, end: float, num: int, denom: int) -> str:
     return f"{beat_to_bar(start, num, denom)}-{beat_to_bar(end, num, denom)}"
 
 
+def _num(value: float | None) -> str:
+    """A beat or clip time printed exactly enough to edit with: 312.0 -> "312"."""
+    if value is None:
+        return "?"
+    text = f"{float(value):.6f}".rstrip("0").rstrip(".")
+    return "0" if text == "-0" else text
+
+
+def _yes_no(value: object) -> str:
+    return "yes" if value else "no"
+
+
+def _clip_beats(clip: dict) -> str:
+    """One line of a clip's exact positions in beats and its loop state."""
+    start, end = clip.get("start_time", 0), clip.get("end_time", 0)
+    line = (
+        f"beats {_num(start)}-{_num(end)} (length {_num(end - start)}) | "
+        f"looping: {_yes_no(clip.get('looping'))}, "
+        f"loop {_num(clip.get('loop_start'))}-{_num(clip.get('loop_end'))} | "
+        f"markers {_num(clip.get('start_marker'))}-{_num(clip.get('end_marker'))} | "
+        f"muted: {_yes_no(clip.get('muted'))}"
+    )
+    if clip.get("is_audio") and not clip.get("warping"):
+        line += " (unwarped: loop and markers in seconds of the file)"
+    return line
+
+
 def _audio_source(clip: dict) -> str:
     """The audio file an arrangement clip plays and, if unwarped, which seconds of it."""
     if not clip.get("file_path"):
@@ -60,6 +87,11 @@ def _audio_source(clip: dict) -> str:
 @ableton_tool("getting arrangement info")
 def get_arrangement_info(ctx: Context, track_index: int = 0) -> str:
     """Get arrangement clips and transport state.
+
+    Each clip is listed by bar, then on a second line with its exact beats:
+    start, end and length in song beats, looping, loop start/end and start/end
+    markers in clip time, and whether it is muted. The loop line gives the
+    transport loop's bars, on/off, start beat and length in beats.
 
     Parameters:
     - track_index: Track number (1-based). 0 = all tracks.
@@ -81,10 +113,14 @@ def get_arrangement_info(ctx: Context, track_index: int = 0) -> str:
         f"Playing: {transport.get('is_playing')} | "
         f"Position: bar {beat_to_bar(transport.get('current_time', 0), num, denom)}",
     ]
-    if transport.get("loop_enabled"):
+    if "loop_enabled" in transport:
         loop_start = transport.get("loop_start", 0)
-        loop_end = loop_start + transport.get("loop_length", 0)
-        lines.append(f"Loop: bars {_bar_range(loop_start, loop_end, num, denom)}")
+        loop_length = transport.get("loop_length", 0)
+        lines.append(
+            f"Loop: bars {_bar_range(loop_start, loop_start + loop_length, num, denom)} | "
+            f"{'on' if transport.get('loop_enabled') else 'off'} | "
+            f"start beat {_num(loop_start)}, length {_num(loop_length)} beats"
+        )
 
     for track in result.get("tracks", []):
         clips = track.get("arrangement_clips", [])
@@ -99,6 +135,7 @@ def get_arrangement_info(ctx: Context, track_index: int = 0) -> str:
                 f'  {clip.get("index", 0) + 1}. "{clip.get("name", "")}" bars {bars}{muted}'
                 f"{_audio_source(clip)}"
             )
+            lines.append(f"     {_clip_beats(clip)}")
 
     return "\n".join(lines)
 
@@ -135,23 +172,43 @@ def set_song_time(ctx: Context, bar: int = 0, beat: float = 0.0) -> str:
     return f"Jumped to bar {beat_to_bar(time_val, num, denom)} (beat {time_val})"
 
 
+def _loop_differences(result: dict) -> list[str]:
+    """Where the loop Live reports differs from the one that was requested."""
+    requested = result.get("requested")
+    if not isinstance(requested, dict):
+        return []
+    wrong = []
+    if bool(requested.get("enabled")) != bool(result.get("enabled")):
+        wrong.append(f"loop {'on' if requested.get('enabled') else 'off'}")
+    for key in ("start", "length"):
+        want, got = requested.get(key), result.get(key)
+        if want is not None and got is not None and abs(want - got) > 1e-6:
+            wrong.append(f"{key} {_num(want)}")
+    return wrong
+
+
 @ableton_tool("setting arrangement loop")
 def set_arrangement_loop(
     ctx: Context,
     enabled: bool = True,
     start_bar: int = 0,
     end_bar: int = 0,
-    start_beat: float = 0.0,
-    length_beats: float = 0.0,
+    # Bare type with a None default, as for set_arrangement_clip_property:
+    # None means "leave as it is", so a loop can start at beat 0.
+    start_beat: float = None,
+    length_beats: float = None,
 ) -> str:
     """Enable/disable arrangement loop and set region.
+
+    The reply is the loop as Live shows it after the change, read back once
+    Live has applied it.
 
     Parameters:
     - enabled: Whether loop is on.
     - start_bar: Loop start (1-based). Takes precedence over start_beat.
     - end_bar: Loop end (1-based). Used with start_bar to compute length.
-    - start_beat: Loop start in beats.
-    - length_beats: Loop length in beats.
+    - start_beat: Loop start in beats (0 = the start of the song). Omit to keep it.
+    - length_beats: Loop length in beats. Omit to keep it.
     """
     ableton = connection.get_ableton_connection()
     num, denom = _get_time_signature()
@@ -162,16 +219,27 @@ def set_arrangement_loop(
         if end_bar > start_bar:
             params["length"] = bar_to_beat(end_bar, num, denom) - params["start"]
     else:
-        if start_beat > 0:
+        if start_beat is not None:
+            if start_beat < 0:
+                raise ValueError(f"start_beat must be >= 0, got {start_beat}")
             params["start"] = start_beat
-        if length_beats > 0:
+        if length_beats is not None:
+            if length_beats <= 0:
+                raise ValueError(f"length_beats must be > 0, got {length_beats}")
             params["length"] = length_beats
 
     result = ableton.send_command("set_arrangement_loop", params)
     state = "enabled" if result.get("enabled") else "disabled"
     loop_start = result.get("start", 0)
-    loop_end = loop_start + result.get("length", 0)
-    return f"Loop {state}: bars {_bar_range(loop_start, loop_end, num, denom)}"
+    loop_length = result.get("length", 0)
+    msg = (
+        f"Loop {state}: bars {_bar_range(loop_start, loop_start + loop_length, num, denom)} "
+        f"(start beat {_num(loop_start)}, length {_num(loop_length)} beats)"
+    )
+    wrong = _loop_differences(result)
+    if wrong:
+        msg += f"\nWarning: Live shows the loop above, but {', '.join(wrong)} was requested"
+    return msg
 
 
 @ableton_tool("jumping to cue point")
@@ -589,3 +657,242 @@ def manage_clip_automation(
     if action == "clear_all":
         return f"Cleared all automation on {ref}, track {track_index}"
     return f"Automation {action}: {parameter_name} on {ref}, track {track_index}"
+
+
+def _clip_ref(result: dict) -> str:
+    clip = result.get("clip", {})
+    return f"'{clip.get('name') or '(unnamed)'}' on '{result.get('track')}'"
+
+
+def _clip_summary(clip: dict) -> str:
+    index = clip.get("index")
+    number = f"#{index + 1} " if isinstance(index, int) else ""
+    return f'{number}"{clip.get("name", "")}" {_clip_beats(clip)}'
+
+
+def _note_line(note: dict) -> str:
+    song = note.get("song_time")
+    where = f"song beat {_num(song)}" if song is not None else "not played"
+    return (
+        f"  pitch {note.get('pitch')} | start {_num(note.get('start_time'))} ({where}) | "
+        f"duration {_num(note.get('duration'))} | velocity {_num(note.get('velocity'))} | "
+        f"muted: {_yes_no(note.get('mute'))}"
+    )
+
+
+@ableton_tool("adding notes to arrangement clip")
+def add_notes_to_arrangement_clip(
+    ctx: Context, track_index: int, clip_index: int, notes: list[dict[str, int | float | bool]]
+) -> str:
+    """Add MIDI notes to an arrangement MIDI clip.
+
+    Parameters:
+    - track_index: Track number (1-based).
+    - clip_index: Clip position in the arrangement (1-based).
+    - notes: List of notes, each {"pitch", "start_time" (clip beats), "duration",
+      "velocity", "mute"}.
+    """
+    ableton = connection.get_ableton_connection()
+    result = ableton.send_command(
+        "add_notes_to_arrangement_clip",
+        {
+            "track_index": to_zero_based(track_index, "track_index"),
+            "clip_index": to_zero_based(clip_index, "clip_index"),
+            "notes": notes,
+        },
+    )
+    count = result.get("note_count", len(notes))
+    return f"Added {count} note(s) to arrangement clip {clip_index} on track {track_index}"
+
+
+# Bare types with None defaults below (not "X | None"), as for
+# set_arrangement_clip_property: None means "not given".
+
+
+@ableton_tool("reading arrangement clip notes")
+def get_arrangement_clip_notes(
+    ctx: Context,
+    track_index: int,
+    clip_index: int = 0,
+    clip_name: str = "",
+    start: float = None,
+    end: float = None,
+) -> str:
+    """Read the notes of an arrangement MIDI clip.
+
+    Each note shows its start in clip beats (the time add_notes_to_arrangement_clip
+    uses) and the song beat where it first plays.
+
+    Parameters:
+    - track_index: Track number (1-based).
+    - clip_index: Clip position in the arrangement (1-based).
+    - clip_name: Clip name (alternative to clip_index).
+    - start: Range start in clip beats. Default: the start of what the clip plays.
+    - end: Range end in clip beats (exclusive). Default: the end of what the clip plays.
+    """
+    params = {
+        "track_index": to_zero_based(track_index, "track_index"),
+        **arrangement_clip_target(clip_index, clip_name),
+        "start": start,
+        "end": end,
+    }
+    result = connection.get_ableton_connection().send_command("get_arrangement_clip_notes", params)
+    lines = [
+        f"{result.get('note_count', 0)} note(s) in {_clip_ref(result)}, clip beats "
+        f"{_num(result.get('range_start'))}-{_num(result.get('range_end'))}",
+        f"Clip: {_clip_summary(result.get('clip', {}))}",
+    ]
+    lines += [_note_line(note) for note in result.get("notes", [])]
+    return "\n".join(lines)
+
+
+@ableton_tool("removing arrangement clip notes")
+def remove_arrangement_clip_notes(
+    ctx: Context,
+    track_index: int,
+    clip_index: int = 0,
+    clip_name: str = "",
+    start: float = None,
+    end: float = None,
+    pitch: int = None,
+) -> str:
+    """Remove the notes that start in a range of an arrangement MIDI clip.
+
+    The clip itself stays, so a part can be replaced with
+    add_notes_to_arrangement_clip without recreating the clip.
+
+    Parameters:
+    - track_index: Track number (1-based).
+    - clip_index: Clip position in the arrangement (1-based).
+    - clip_name: Clip name (alternative to clip_index).
+    - start: Range start in clip beats. Default: the start of what the clip plays.
+    - end: Range end in clip beats (exclusive). Default: the end of what the clip plays.
+    - pitch: Only remove notes of this MIDI pitch. Default: every pitch.
+    """
+    params = {
+        "track_index": to_zero_based(track_index, "track_index"),
+        **arrangement_clip_target(clip_index, clip_name),
+        "start": start,
+        "end": end,
+        "pitch": pitch,
+    }
+    result = connection.get_ableton_connection().send_command(
+        "remove_arrangement_clip_notes", params
+    )
+    which = f"pitch {pitch} " if pitch is not None else ""
+    return (
+        f"Removed {result.get('removed', 0)} {which}note(s) starting in clip beats "
+        f"{_num(result.get('range_start'))}-{_num(result.get('range_end'))} of "
+        f"{_clip_ref(result)}; {result.get('remaining', 0)} note(s) remain in the clip"
+    )
+
+
+@ableton_tool("setting arrangement clip bounds")
+def set_arrangement_clip_bounds(
+    ctx: Context,
+    track_index: int,
+    clip_index: int = 0,
+    clip_name: str = "",
+    start_marker: float = None,
+    end_marker: float = None,
+) -> str:
+    """Set an arrangement clip's start and/or end marker without changing its loop state.
+
+    A looped clip keeps looping, loop start and loop end. An unlooped clip
+    plays from start to end marker, so its length follows them. Markers are in
+    clip time: beats, or seconds of the file for unwarped audio.
+
+    Parameters:
+    - track_index: Track number (1-based).
+    - clip_index: Clip position in the arrangement (1-based).
+    - clip_name: Clip name (alternative to clip_index).
+    - start_marker: New start marker. Omit to keep it.
+    - end_marker: New end marker. Omit to keep it.
+    """
+    params = {
+        "track_index": to_zero_based(track_index, "track_index"),
+        **arrangement_clip_target(clip_index, clip_name),
+        "start_marker": start_marker,
+        "end_marker": end_marker,
+    }
+    result = connection.get_ableton_connection().send_command("set_arrangement_clip_bounds", params)
+    previous = result.get("previous", {})
+    return (
+        f"Set markers of {_clip_ref(result)} (were "
+        f"{_num(previous.get('start_marker'))}-{_num(previous.get('end_marker'))})\n"
+        f"Now: {_clip_summary(result.get('clip', {}))}" + ARRANGEMENT_TIP
+    )
+
+
+@ableton_tool("setting arrangement clip end")
+def set_arrangement_clip_end(
+    ctx: Context,
+    track_index: int,
+    end_beat: float,
+    clip_index: int = 0,
+    clip_name: str = "",
+) -> str:
+    """Move an arrangement clip's right edge to a song beat, keeping its loop state.
+
+    Shortening cuts the clip at end_beat, as split_arrangement_clip does, and
+    deletes the rest, so a looped clip keeps its loop. An unlooped clip can also
+    be lengthened (its end marker moves); a looped clip cannot, since Live's API
+    has no call for it.
+
+    Parameters:
+    - track_index: Track number (1-based).
+    - end_beat: New end, in song beats (0-based).
+    - clip_index: Clip position in the arrangement (1-based).
+    - clip_name: Clip name (alternative to clip_index).
+    """
+    params = {
+        "track_index": to_zero_based(track_index, "track_index"),
+        **arrangement_clip_target(clip_index, clip_name),
+        "end_beat": end_beat,
+    }
+    result = connection.get_ableton_connection().send_command("set_arrangement_clip_end", params)
+    if result.get("method") == "unchanged":
+        return f"{_clip_ref(result)} already ends at beat {_num(end_beat)}"
+    return (
+        f"Moved the end of {_clip_ref(result)} from beat "
+        f"{_num(result.get('previous_end_time'))} to {_num(end_beat)}\n"
+        f"Now: {_clip_summary(result.get('clip', {}))}" + ARRANGEMENT_TIP
+    )
+
+
+@ableton_tool("splitting arrangement clip")
+def split_arrangement_clip(
+    ctx: Context,
+    track_index: int,
+    beat: float,
+    clip_index: int = 0,
+    clip_name: str = "",
+) -> str:
+    """Split an arrangement clip (MIDI or audio) in two at a song beat.
+
+    Live's API has no split call, so the right-hand piece is built from copies
+    past the end of the track and placed at the beat, where it cuts the clip as
+    pasting does. Both pieces are checked against the original (positions,
+    loop state, audio settings, and for MIDI every note they play); if they
+    differ, the original is put back from a backup copy.
+
+    Parameters:
+    - track_index: Track number (1-based).
+    - beat: Split point, in song beats (0-based), inside the clip.
+    - clip_index: Clip position in the arrangement (1-based).
+    - clip_name: Clip name (alternative to clip_index).
+    """
+    params = {
+        "track_index": to_zero_based(track_index, "track_index"),
+        **arrangement_clip_target(clip_index, clip_name),
+        "beat": beat,
+    }
+    result = connection.get_ableton_connection().send_command("split_arrangement_clip", params)
+    original = result.get("original", {})
+    return (
+        f"Split '{result.get('left', {}).get('name') or '(unnamed)'}' on "
+        f"'{result.get('track')}' (beats {_num(original.get('start_time'))}-"
+        f"{_num(original.get('end_time'))}) at beat {_num(result.get('split_at', beat))}\n"
+        f"Left: {_clip_summary(result.get('left', {}))}\n"
+        f"Right: {_clip_summary(result.get('right', {}))}" + ARRANGEMENT_TIP
+    )

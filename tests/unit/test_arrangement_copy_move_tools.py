@@ -138,4 +138,4 @@ class TestArrangementInfoAudioSource:
 
     def test_midi_clip_unchanged(self, ableton):
         out = self._info(ableton, {"name": "Riff", "start_time": 0, "end_time": 4})
-        assert out.rstrip().endswith('"Riff" bars 1-2')
+        assert '"Riff" bars 1-2\n' in out

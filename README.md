@@ -53,6 +53,10 @@ This project provides comprehensive, programmatic control over the Ableton Live 
     * Copy part of an arrangement audio clip, given in seconds of its audio file, to a new bar on the same track with `copy_arrangement_clip_region`. The copy plays the original file, with no new audio file rendered.
     * Move an arrangement clip to a new bar on its track with `move_arrangement_clip`.
     * See [Copying and moving arrangement clips](#copying-and-moving-arrangement-clips).
+    * Read the notes of an arrangement MIDI clip (`get_arrangement_clip_notes`), add notes (`add_notes_to_arrangement_clip`), and remove the notes in a range (`remove_arrangement_clip_notes`) without recreating the clip.
+    * Split an arrangement clip at a beat (`split_arrangement_clip`), move its end (`set_arrangement_clip_end`), or set its start and end markers (`set_arrangement_clip_bounds`) without changing its loop state.
+    * See [Arrangement clip notes, trimming and splitting](#arrangement-clip-notes-trimming-and-splitting).
+    * `get_arrangement_info` lists each clip's exact beats (start, end, length), its loop and markers, and the transport loop's start and length in beats.
 
 * **Device and Parameter Control:**
     * Load instruments and effects from Ableton's browser by URI.
@@ -279,6 +283,18 @@ A guarded check runs both tools against a scratch Set in real Live. Run it only 
 ABLETON_MCP_LIVE_TESTS=1 ABLETON_MCP_CLIP_EDIT_FILE=/path/to/take.wav \
     uv run --extra test python -m pytest -m integration tests/integration/test_arrangement_clip_edit_live.py -s
 ```
+
+## Arrangement Clip Notes, Trimming and Splitting
+
+`get_arrangement_clip_notes` lists the notes of an arrangement MIDI clip: pitch, start in clip beats (the time `add_notes_to_arrangement_clip` takes), the song beat where the note first plays, duration, velocity and mute. By default it reads the part of the clip that plays; `start` and `end` (clip beats) widen or narrow that, and a note outside what the clip plays shows as "not played". `remove_arrangement_clip_notes` removes the notes that start in a range, optionally only one `pitch`, and checks the range is empty afterwards.
+
+Live's API has no call that splits an arrangement clip or sets its end. `split_arrangement_clip` uses the paste behaviour described above: it builds the right-hand piece past the end of the track, from a copy whose left part a second copy cuts away, then duplicates that piece to the split beat, where it cuts the original. Both pieces are compared with the original: positions, name, color, mute, looping and loop, audio settings, and for MIDI every note each piece plays. A verified backup copy waits past the end of the track until that check passes. If it fails, the pieces are removed and the backup is put back in the clip's place.
+
+`set_arrangement_clip_end` takes the new end in song beats. Shortening is a split at the new end followed by deleting the right-hand piece, so a looped clip keeps its loop. An unlooped clip can also be lengthened, by moving its end marker, unless that would run into the next clip. Lengthening a looped clip is refused: its loop and markers don't set its length in the Arrangement, and Live's API has no call that does.
+
+`set_arrangement_clip_bounds` sets a clip's start and/or end marker. A looped clip keeps its looping, loop start and loop end. An unlooped clip plays from start to end marker, so its length follows them. If Live changes anything else, the markers are put back and the tool reports an error.
+
+`set_arrangement_loop` reports the loop as Live shows it after the change: Live applies loop changes after the command returns, so the reply is read on Live's next tick, and it warns when Live's loop differs from the one asked for. `start_beat=0` puts the loop at the start of the song.
 
 ---
 

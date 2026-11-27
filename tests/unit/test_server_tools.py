@@ -652,7 +652,7 @@ class TestArrangementTools:
         out, fake = run_tool(tools.arrangement.set_arrangement_loop, replies, **kwargs)
         assert fake.sent("set_arrangement_loop") == [params]
         state = "enabled" if params["enabled"] else "disabled"
-        assert out == f"Loop {state}: bars 2-4"
+        assert out == f"Loop {state}: bars 2-4 (start beat 4, length 8 beats)"
 
     @pytest.mark.parametrize("kwargs,time_val,label", [
         ({"bar": 5, "name": "Drop"}, 16.0, "bar 5"),
