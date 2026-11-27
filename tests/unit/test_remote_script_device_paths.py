@@ -639,6 +639,23 @@ class TestLoadDeviceFromPathErrors:
         script._load_device_from_path(0, "Pad.adg")
         assert browser.load_item.call_args[0][0].name == "Pad.adg"
 
+    @pytest.mark.parametrize("path", [
+        "Presets/Instruments/Wavetable/Bass Pad.amxd",
+        "Pad.amxd",
+    ])
+    def test_an_explicit_extension_does_not_match_a_different_extension(self, path):
+        script, _, browser = self._script()
+        with pytest.raises(ValueError, match="not found"):
+            script._load_device_from_path(0, path)
+        browser.load_item.assert_not_called()
+
+    def test_an_explicit_extension_matches_an_extensionless_browser_item(self):
+        library = BItem("User Library", [BItem("Chord Gen", loadable=True)])
+        script, _ = loading_script(
+            make_browser(library), adds=("Chord Gen", "MxDeviceMidiEffect"))
+        result = script._load_device_from_path(0, "Chord Gen.amxd")
+        assert result["item_name"] == "Chord Gen"
+
     @pytest.mark.parametrize("path", ["", "   ", "//"])
     def test_an_empty_path_is_rejected(self, path):
         script, _, browser = self._script()

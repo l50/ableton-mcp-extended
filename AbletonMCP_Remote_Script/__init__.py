@@ -2057,7 +2057,10 @@ class AbletonMCP(ControlSurface):
             if child.name.strip().lower() == wanted:
                 return child
         bare = self._without_device_extension(part)
-        matches = [c for c in children if self._without_device_extension(c.name) == bare]
+        if bare != wanted:
+            matches = [c for c in children if c.name.strip().lower() == bare]
+        else:
+            matches = [c for c in children if self._without_device_extension(c.name) == bare]
         if len(matches) > 1:
             raise ValueError("Path part '{0}' matches several items in '{1}': {2}. "
                              "Include the file extension.".format(

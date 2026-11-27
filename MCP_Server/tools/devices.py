@@ -30,13 +30,13 @@ def _devices_named(
 
 
 def _path_target(
-    device_path: DevicePath, chain_index: int, *, allow_chain_end: bool = False
+    device_path: DevicePath | None, chain_index: int, *, allow_chain_end: bool = False
 ) -> WirePath | None:
     """Parse the optional device_path; None when the caller did not give one.
 
     A path replaces device_index and chain_index, so giving both is an error.
     """
-    if not device_path:
+    if device_path == "" or device_path is None:
         return None
     if chain_index:
         raise ValueError("Give device_path or chain_index, not both")

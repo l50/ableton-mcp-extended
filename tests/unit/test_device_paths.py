@@ -234,11 +234,17 @@ class TestDevicePathTools:
 
     @pytest.mark.parametrize("call", [
         lambda: get_device_parameters(MagicMock(), track_index=1, device_path="1/2"),
+        lambda: get_device_parameters(MagicMock(), track_index=1, device_path=[]),
         lambda: set_device_parameter(MagicMock(), track_index=1, device_path="c1",
                                      parameter_index=1),
+        lambda: set_device_parameter(MagicMock(), track_index=1, device_path=[],
+                                     parameter_index=1),
         lambda: get_chain_info(MagicMock(), track_index=1, device_path="1/c0"),
+        lambda: get_chain_info(MagicMock(), track_index=1, device_path=[]),
         lambda: enable_device(MagicMock(), track_index=1, device_path="1/c2"),
+        lambda: enable_device(MagicMock(), track_index=1, device_path=[]),
         lambda: disable_device(MagicMock(), track_index=1, device_path=[1, ["chain", 2]]),
+        lambda: disable_device(MagicMock(), track_index=1, device_path=[]),
     ])
     def test_a_malformed_path_is_reported_without_asking_live(self, ableton, call):
         out = call()
