@@ -52,6 +52,7 @@ This project provides comprehensive, programmatic control over the Ableton Live 
 * **Arrangement Clip Editing:**
     * Copy part of an arrangement audio clip, given in seconds of its audio file, to a new bar on the same track with `copy_arrangement_clip_region`. The copy plays the original file, with no new audio file rendered.
     * Move an arrangement clip to a new bar on its track with `move_arrangement_clip`.
+    * List a track's take lanes and each lane's clips (start, end, name, and audio file) with `list_take_lanes`. Take lanes can be listed but not deleted through these tools, because Live's script API has no lane deletion and its clip deletion removes the main-lane clip when given a take-lane clip.
     * See [Copying and moving arrangement clips](#copying-and-moving-arrangement-clips).
     * Read the notes of an arrangement MIDI clip (`get_arrangement_clip_notes`), add notes (`add_notes_to_arrangement_clip`), and remove the notes in a range (`remove_arrangement_clip_notes`) without recreating the clip.
     * Split an arrangement clip at a beat (`split_arrangement_clip`), move its end (`set_arrangement_clip_end`), or set its start and end markers (`set_arrangement_clip_bounds`) without changing its loop state.

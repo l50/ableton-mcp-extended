@@ -271,6 +271,8 @@ class AbletonMCP(ControlSurface):
                 response["result"] = self._get_track_routing_options(params)
             elif command_type == "get_recording_status":
                 response["result"] = self._get_recording_status()
+            elif command_type == "get_take_lanes":
+                response["result"] = self._list_take_lanes(params)
             elif command_type == "list_tracks":
                 response["result"] = self._list_tracks(
                     params.get("include_returns", True),
@@ -2530,6 +2532,26 @@ class AbletonMCP(ControlSurface):
         except Exception as e:
             self.log_message("Error adding notes to arrangement clip: " + str(e))
             raise
+
+    def _take_lane_track(self, params):
+        track = self._resolve_track(params)
+        if not hasattr(track, "take_lanes"):
+            raise RuntimeError("This Live version does not expose take lanes")
+        return track
+
+    def _take_lane_clip_info(self, clip, index):
+        return {"clip_index": index, "name": clip.name,
+                "start": clip.start_time, "end": clip.end_time,
+                "file": clip.file_path if clip.is_audio_clip else None}
+
+    def _list_take_lanes(self, params):
+        track = self._take_lane_track(params)
+        return {"track_index": list(self._song.tracks).index(track),
+                "take_lanes": [
+                    {"lane_index": i, "name": lane.name,
+                     "clips": [self._take_lane_clip_info(clip, j)
+                               for j, clip in enumerate(lane.arrangement_clips)]}
+                    for i, lane in enumerate(track.take_lanes)]}
 
     def _delete_arrangement_clip(self, track_index, clip_index=None, clip_name=None):
         """Delete an arrangement clip."""
