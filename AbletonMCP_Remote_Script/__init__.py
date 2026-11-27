@@ -2114,21 +2114,31 @@ class AbletonMCP(ControlSurface):
             item = child
         return item
 
-    def _added_device_indices(self, before, after):
-        """Indices in *after* of the devices a load added to a track."""
-        if not before:
-            return list(range(len(after)))
-        added = [i for i, device in enumerate(after) if device not in before]
-        if len(added) < len(after):
-            return added
-        # Nothing compared equal to an earlier device, so the objects cannot be
-        # told apart; a single new device is the first whose name differs.
-        if len(after) == len(before) + 1:
-            names = [device.name for device in before]
-            for i, device in enumerate(after):
-                if i >= len(names) or device.name != names[i]:
-                    return [i]
-        return []
+    def _device_ids(self, track):
+        """(name, class) of each device on a track, read now.
+
+        Read before and after a load rather than keeping device objects: Live
+        raises when a replaced device's object is touched, and when two device
+        objects of different kinds are compared with ==.
+        """
+        return [(d.name, d.class_name) for d in track.devices]
+
+    def _added_device_indices(self, before_ids, after_ids):
+        """Indices in *after_ids* of the devices a load added to a track.
+
+        A load usually inserts one device, but an instrument loaded onto a
+        track that already has one replaces it, so the count can stay the same.
+        """
+        if not before_ids:
+            return list(range(len(after_ids)))
+        changed = [i for i, ident in enumerate(after_ids)
+                   if i >= len(before_ids) or ident != before_ids[i]]
+        if len(after_ids) == len(before_ids) + 1:
+            # One inserted device shifts the ones after it; it is the first change.
+            return changed[:1]
+        # A replacement; an identical device loaded over itself changes nothing
+        # to compare, so the devices that are there now are the loaded ones.
+        return changed or list(range(len(after_ids)))
 
     def _load_device_from_path(self, track_index, path):
         """Load the device, preset or rack at a browser file path onto a track."""
@@ -2147,12 +2157,12 @@ class AbletonMCP(ControlSurface):
                 raise ValueError("'{0}' is {1}, not something that can be loaded".format(
                     item.name, "a folder" if item.is_folder else "not loadable"))
 
-            before = list(track.devices)
+            before_ids = self._device_ids(track)
             self._song.view.selected_track = track
             browser.load_item(item)
 
             after = list(track.devices)
-            added = self._added_device_indices(before, after)
+            added = self._added_device_indices(before_ids, self._device_ids(track))
             if not added:
                 raise RuntimeError(
                     "Live loaded '{0}' but no new device appeared on track '{1}'".format(

@@ -427,62 +427,91 @@ class TestLoadDeviceFromPath:
 
         assert (result["device_name"], result["device_index"]) == ("Chord Gen", 0)
 
-    def test_devices_that_cannot_be_compared_fall_back_to_names(self):
-        """Live hands out fresh objects for each read, so none equals an earlier one."""
-        class Fresh(Device):
-            def __eq__(self, other):
-                return False
+    def test_replaced_devices_are_not_touched_after_the_load(self):
+        """Seen in Live: a device the load replaced raises when it is read."""
+        class Dead(Device):
+            alive = True
 
-            __hash__ = object.__hash__
+            @property
+            def name(self):
+                if not Dead.alive:
+                    raise RuntimeError("Python argument types did not match C++ signature")
+                return "Wavetable"
+
+            @name.setter
+            def name(self, value):
+                pass
 
         browser = make_browser()
-        track = Track("Test Track", [Fresh("A"), Fresh("B")])
+        old = Dead("Wavetable", "InstrumentVector")
+        track = Track("Test Track", [old])
         script = make_script([track])
         script.application.return_value = types.SimpleNamespace(browser=browser)
 
         def load(item):
-            names = ["A", "Bass Pad", "B"]
-            track.devices = [Fresh(name) for name in names]
+            Dead.alive = False
+            track.devices = [Device("Instrument Rack", "InstrumentGroupDevice", "Rack")]
 
         browser.load_item.side_effect = load
+        try:
+            result = script._load_device_from_path(
+                0, "Presets/Instruments/Instrument Rack/Layered Keys.adg")
+        finally:
+            Dead.alive = True
+
+        assert (result["device_name"], result["device_index"]) == ("Instrument Rack", 0)
+
+    def test_an_added_device_with_the_name_of_an_existing_one_is_found_by_class(self):
+        browser = make_browser()
+        track = Track("Test Track", [Device("Utility", "StereoGain")])
+        script = make_script([track])
+        script.application.return_value = types.SimpleNamespace(browser=browser)
+        browser.load_item.side_effect = lambda item: track.devices.append(
+            Device("Utility", "MxDeviceAudioEffect"))
 
         result = script._load_device_from_path(0, "Presets/Instruments/Wavetable/Bass Pad.adv")
 
-        assert (result["device_name"], result["device_index"]) == ("Bass Pad", 1)
+        assert result["device_index"] == 1
 
-    def test_a_new_last_device_is_found_by_name_when_devices_cannot_be_compared(self):
-        class Fresh(Device):
-            def __eq__(self, other):
-                return False
-
-            __hash__ = object.__hash__
-
+    def test_an_instrument_replacing_the_tracks_instrument_is_the_loaded_device(self):
+        """Seen in Live: loading a rack onto a track with an instrument replaces it."""
         browser = make_browser()
-        track = Track("Test Track", [Fresh("A")])
+        track = Track("Test Track", [wavetable("Wavetable")])
         script = make_script([track])
         script.application.return_value = types.SimpleNamespace(browser=browser)
         browser.load_item.side_effect = lambda item: setattr(
-            track, "devices", [Fresh("A"), Fresh("Bass Pad")])
+            track, "devices", [Device("Instrument Rack", "InstrumentGroupDevice", "Rack")])
+
+        result = script._load_device_from_path(
+            0, "Presets/Instruments/Instrument Rack/Layered Keys.adg")
+
+        assert (result["device_name"], result["device_index"], result["devices_added"]) == (
+            "Instrument Rack", 0, 1)
+
+    def test_a_replacement_keeps_the_other_devices_out_of_the_result(self):
+        browser = make_browser()
+        track = Track("Test Track", [wavetable("Wavetable"), Device("Utility", "StereoGain")])
+        script = make_script([track])
+        script.application.return_value = types.SimpleNamespace(browser=browser)
+        utility = track.devices[1]
+        browser.load_item.side_effect = lambda item: setattr(
+            track, "devices", [Device("Bass Pad", "InstrumentVector"), utility])
 
         result = script._load_device_from_path(0, "Presets/Instruments/Wavetable/Bass Pad.adv")
 
-        assert (result["device_name"], result["device_index"]) == ("Bass Pad", 1)
+        assert (result["device_name"], result["device_index"]) == ("Bass Pad", 0)
 
-    def test_a_reload_that_adds_nothing_is_an_error_even_when_devices_cannot_be_compared(self):
-        class Fresh(Device):
-            def __eq__(self, other):
-                return False
-
-            __hash__ = object.__hash__
-
+    def test_a_same_named_replacement_is_still_reported(self):
         browser = make_browser()
-        track = Track("Test Track", [Fresh("A")])
+        track = Track("Test Track", [wavetable("Wavetable")])
         script = make_script([track])
         script.application.return_value = types.SimpleNamespace(browser=browser)
-        browser.load_item.side_effect = lambda item: setattr(track, "devices", [Fresh("A")])
+        browser.load_item.side_effect = lambda item: setattr(
+            track, "devices", [wavetable("Wavetable")])
 
-        with pytest.raises(RuntimeError, match="no new device appeared"):
-            script._load_device_from_path(0, "Presets/Instruments/Wavetable/Bass Pad.adv")
+        result = script._load_device_from_path(0, "Presets/Instruments/Wavetable/Bass Pad.adv")
+
+        assert (result["device_name"], result["device_index"]) == ("Wavetable", 0)
 
     def test_logs_and_raises_on_failure(self):
         script, _ = loading_script(make_browser())
