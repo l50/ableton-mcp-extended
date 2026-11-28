@@ -335,7 +335,10 @@ class ExportRequest:
 
     @property
     def expected_paths(self) -> List[str]:
-        return [os.path.join(self.directory, self.stem + ext) for ext in FORMAT_EXTENSIONS[self.format]]
+        # Live adds the track's name to the name given in the Save panel when
+        # one track is rendered ("<name> <track>.wav"); the Main mix keeps it.
+        stem = f"{self.stem} {self.track_name}" if self.track_mode == "track" else self.stem
+        return [os.path.join(self.directory, stem + ext) for ext in FORMAT_EXTENSIONS[self.format]]
 
     @property
     def output_file(self) -> str:
@@ -497,46 +500,53 @@ function findControlShallow(w, label, roles) {
   }
   throw new Error("control '" + label + "' not found in '" + safe(function () { return w.name(); }, '') + "'");
 }
-// Render Start and Render Length are each three numeric parts (bars, beats,
-// sixteenths). Find a field's three parts: controls labelled "<label> ..."
-// (e.g. "Render Start Bars"), else the three value controls that follow, or
-// sit inside, the element labelled exactly <label>.
-var TIME_ROLES = ['AXTextField', 'AXSlider', 'AXIncrementor', 'AXValueIndicator',
-                  'AXStaticText', 'AXComboBox', 'AXTextArea'];
+// Render Start and Render Length are each three AXSliders (bars, beats,
+// sixteenths) described "Start of Rendered Audio File (Bar)", "(Beat)" and
+// "(Sixteenths)", or "Length of Rendered Audio File (...)". Live ignores
+// AXValue writes and clicks on them, and Return in the dialog presses Export,
+// so a value is reached with the sliders' own AXIncrement / AXDecrement
+// actions (one step each) and read back after every step.
+var TIME_FIELDS = {
+  'renderstart': 'Start of Rendered Audio File',
+  'renderlength': 'Length of Rendered Audio File'
+};
+var TIME_UNITS = ['Bar', 'Beat', 'Sixteenths'];
+var MAX_NUDGES = 4000;
 function firstInt(v) {
   var m = /-?\d+/.exec(String(v === undefined || v === null ? '' : v));
   return m ? parseInt(m[0], 10) : null;
 }
 function timeFieldParts(w, label) {
-  var all = w.entireContents(), want = norm(label), ordered = [], exact = -1;
+  var prefix = TIME_FIELDS[norm(label)];
+  if (!prefix) throw new Error("'" + label + "' is not a time field (Render Start or Render Length)");
+  var all = w.entireContents(), parts = [null, null, null];
   for (var i = 0; i < all.length; i++) {
-    var role = safe(function () { return all[i].role(); }, '');
-    var ls = labelsOf(all[i]).map(norm);
-    var hit = ls.some(function (l) { return l === want; });
-    if (hit && exact < 0) exact = ordered.length;
-    ordered.push({el: all[i], role: role, labels: ls, exact: hit});
+    if (safe(function () { return all[i].role(); }, '') !== 'AXSlider') continue;
+    var d = safe(function () { return all[i].description(); }, '');
+    for (var u = 0; u < 3; u++)
+      if (d === prefix + ' (' + TIME_UNITS[u] + ')') parts[u] = all[i];
   }
-  var named = ordered.filter(function (o) {
-    return TIME_ROLES.indexOf(o.role) >= 0 &&
-      o.labels.some(function (l) { return l.length > want.length && l.indexOf(want) === 0; });
-  });
-  if (named.length === 3) return named.map(function (o) { return o.el; });
-  if (exact >= 0) {
-    var anchor = ordered[exact].el;
-    var inside = safe(function () { return anchor.uiElements(); }, []).filter(function (k) {
-      return TIME_ROLES.indexOf(safe(function () { return k.role(); }, '')) >= 0;
-    });
-    if (inside.length >= 3) return inside.slice(0, 3);
-    var after = ordered.slice(exact + 1).filter(function (o) {
-      return TIME_ROLES.indexOf(o.role) >= 0 && o.labels.every(function (l) { return !l || l.indexOf('render') !== 0 || l.indexOf(want) === 0; });
-    });
-    if (after.length >= 3) return after.slice(0, 3).map(function (o) { return o.el; });
-  }
-  throw new Error("the three parts of '" + label + "' were not found in '" +
-                  safe(function () { return w.name(); }, '') + "' (try the dump op)");
+  for (var u = 0; u < 3; u++)
+    if (!parts[u]) throw new Error("the three parts of '" + label + "' were not found in '" +
+      safe(function () { return w.name(); }, '') + "' (try the dump op)");
+  return parts;
 }
 function readParts(parts) {
   return parts.map(function (el) { return firstInt(safe(function () { return el.value(); }, null)); });
+}
+// Step one slider to a value. Beats and sixteenths wrap round, bars stop at
+// their ends, so a step that changes nothing means the value cannot be reached.
+function nudgeTo(el, target, what) {
+  var current = firstInt(safe(function () { return el.value(); }, null));
+  for (var n = 0; current !== target && n < MAX_NUDGES; n++) {
+    var action = (current === null || target > current) ? 'AXIncrement' : 'AXDecrement';
+    el.actions.byName(action).perform();
+    var next = firstInt(safe(function () { return el.value(); }, null));
+    if (next === current)
+      throw new Error(what + ' stays at ' + current + ' and cannot be set to ' + target);
+    current = next;
+  }
+  if (current !== target) throw new Error(what + ' did not reach ' + target + ' in ' + MAX_NUDGES + ' steps');
 }
 function dumpWindow(w) {
   var all = w.entireContents(), out = [];
@@ -735,21 +745,14 @@ function dispatch(cmd) {
       return {fields: readParts(timeFieldParts(w, cmd.label))};
     }
     case 'set_time_field': {
-      // Live's bar fields take typed digits: click the part, type, Return.
       var w = findWindow(p, cmd.window);
       var parts = timeFieldParts(w, cmd.label);
       if (cmd.fields.length !== 3) return {ok: false, error: 'a time field needs three parts'};
       var before = readParts(parts);
-      for (var i = 0; i < 3; i++) {
-        if (before[i] === cmd.fields[i]) continue;
-        requireFront(p, cmd, 'the ' + cmd.label + ' value');
-        SE.click(parts[i]);
-        delay(0.25);
-        requireFront(p, cmd, 'the ' + cmd.label + ' value');
-        SE.keystroke(String(cmd.fields[i]));
-        SE.keyCode(36);
-        delay(0.25);
-      }
+      // Bars first: the shortest length (0.0.1) only lets a part go to 0 once
+      // a bar or beat is set.
+      for (var i = 0; i < 3; i++)
+        nudgeTo(parts[i], cmd.fields[i], cmd.label + ' ' + TIME_UNITS[i].toLowerCase());
       return {before: before, after: readParts(parts)};
     }
     case 'dump':

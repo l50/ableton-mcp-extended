@@ -364,7 +364,12 @@ class FakeLive:
         chooser = self.controls[le.RENDERED_TRACK]
         if chooser["value"] == "All Individual Tracks":
             # One file per track, beside the name typed in the Save panel.
-            return [os.path.join(directory, f"{filename} {t}{ext}") for t in chooser["options"][2:]]
+            # (and the Main mix under the plain name, as Live does)
+            return [os.path.join(directory, f"{filename} {t}{ext}") for t in chooser["options"][2:]] \
+                + [os.path.join(directory, filename + ext)]
+        if chooser["value"] not in ("Master Bus", "Main", "Master"):
+            # one track: Live adds the track's name to the name from the Save panel
+            return [os.path.join(directory, f"{filename} {chooser['value']}{ext}")]
         return [os.path.join(directory, filename + ext)]
 
     def _write(self, path, data):

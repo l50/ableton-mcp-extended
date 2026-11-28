@@ -116,6 +116,22 @@ class TestStep2RenderedTrack:
         step = next(s for s in result["steps"] if s.get("label") == le.RENDERED_TRACK)
         assert step["values"] == ["Bass"] and step["after"] == "Bass"
 
+    def test_a_named_track_is_written_under_the_name_plus_the_track_name(self, tmp_path, clock):
+        # Observed on Live 12.4.16: rendering one track writes "<name> <track>.wav".
+        live, exporter = make(clock)
+        result = exporter.run(request(tmp_path, name="mix", rendered_track="Bass"))
+        assert result["ok"] is True, result
+        assert result["expected_path"] == str(tmp_path / "mix Bass.wav")
+        assert result["output_files"] == [str(tmp_path / "mix Bass.wav")]
+        assert not os.path.exists(tmp_path / "mix.wav")
+
+    def test_an_existing_file_for_the_named_track_is_refused_without_overwrite(self, tmp_path, clock):
+        (tmp_path / "mix Bass.wav").write_bytes(b"keep")
+        live, exporter = make(clock)
+        result = exporter.run(request(tmp_path, name="mix", rendered_track="Bass"))
+        assert result["ok"] is False and "output file already exists" in result["error"]
+        assert live.calls == []
+
     @pytest.mark.parametrize("spelling", ["all", "ALL", "All Individual Tracks"])
     def test_all_picks_all_individual_tracks(self, tmp_path, clock, spelling):
         live, exporter = make(clock)
@@ -315,12 +331,12 @@ class TestStep4SaveAndWait:
         live, exporter = make(clock, grow_polls=3, render_polls=1,
                               afinfo=afinfo_for(48000, WAV_24))
         result = exporter.run(request(tmp_path, name="mix", rendered_track="all",
-                                      expected_seconds=3.0, expected_files=2))
+                                      expected_seconds=3.0, expected_files=3))
         assert result["ok"] is True, result
         assert live.render_complete is True
         assert sorted(os.path.basename(p) for p in result["output_files"]) == [
-            "mix Bass.wav", "mix Guitar.wav"]
-        assert [f["duration_seconds"] for f in result["files"]] == [3.0, 3.0]
+            "mix Bass.wav", "mix Guitar.wav", "mix.wav"]
+        assert [f["duration_seconds"] for f in result["files"]] == [3.0, 3.0, 3.0]
         assert result["length_verified"] is True
         assert result["output_path"] == result["output_files"][0]
         assert all(f["size_bytes"] == len(live.render_bytes) for f in result["files"])
@@ -329,7 +345,7 @@ class TestStep4SaveAndWait:
         live, exporter = make(clock, afinfo=afinfo_for(48000, WAV_24))
         result = exporter.run(request(tmp_path, name="mix", rendered_track="all", expected_files=5))
         assert result["ok"] is False
-        assert "wrote 2 file(s)" in result["error"] and "5 were expected" in result["error"]
+        assert "wrote 3 file(s)" in result["error"] and "5 were expected" in result["error"]
 
     def test_old_files_in_the_folder_are_not_counted_as_output(self, tmp_path, clock):
         old = tmp_path / "mix Old.wav"
@@ -340,7 +356,7 @@ class TestStep4SaveAndWait:
         result = exporter.run(request(tmp_path, name="mix", rendered_track="all"))
         assert result["ok"] is True, result
         assert [os.path.basename(p) for p in result["output_files"]] == [
-            "mix Bass.wav", "mix Guitar.wav"]
+            "mix Bass.wav", "mix Guitar.wav", "mix.wav"]
 
 
 # ── step 5: return only when done; change nothing while pending ──

@@ -115,6 +115,21 @@ def _check_track_name(ableton: Any, name: str) -> str | None:
     return None
 
 
+def _expected_individual_files(ableton: Any) -> int | None:
+    """How many files All Individual Tracks should write, or None when that is not known.
+
+    Live writes one file per track (return tracks included) and one more for
+    the Main mix under the name given in the Save panel. Group tracks were not
+    observed, so with one in the Set the count is not checked.
+    """
+    rows = ableton.send_command(
+        "list_tracks", {"include_returns": True, "include_master": False}
+    ).get("tracks", [])
+    if not rows or any(row.get("kind") == "group" for row in rows):
+        return None
+    return len(rows) + 1
+
+
 def _plan_range(
     request: live_export.ExportRequest,
     range_name: str,
@@ -224,12 +239,14 @@ def _run_live_export(
             start_bar != 0 or length_bars != 0 or start_beat is not None or length_beats is not None
         )
         needs_range = range_name != "selection" or named
-        if needs_range or request.track_mode == "track":
+        if needs_range or request.track_mode in ("track", "all"):
             ableton = connection.get_ableton_connection()
         if request.track_mode == "track":
             problem = _check_track_name(ableton, request.track_name)
             if problem:
                 return json.dumps(_export_failure(problem, render_range=label))
+        elif request.track_mode == "all":
+            request.expected_files = _expected_individual_files(ableton)
         if needs_range:
             info = ableton.send_command("get_arrangement_info", {"track_index": ALL_TRACKS})
             transport = info.get("transport", {})
@@ -300,8 +317,8 @@ def export_audio(
     Parameters:
     - output_path: Absolute path of the file to write, e.g. "/Users/me/Music/song.wav".
       The folder must exist. The extension is optional; if given it must match format.
-      With rendered_track="all" it is the name the files start with: Live writes one
-      file per track beside it.
+      With a track name Live writes "<name> <track>.wav". With rendered_track="all" it is the name the files start with: Live writes one
+      file per track beside it ("<name> <track>.wav"), plus the Main mix as "<name>.wav".
     - format: "wav", "aiff", "flac" (lossless PCM) or "mp3" (CBR 320).
     - sample_rate: 22050, 32000, 44100, 48000, 88200, 96000, 176400 or 192000.
     - bit_depth: 16, 24 or 32 (PCM formats only).

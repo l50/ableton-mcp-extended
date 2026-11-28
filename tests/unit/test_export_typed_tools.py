@@ -144,10 +144,22 @@ class TestRenderedTrackParameter:
         assert seen["request"].track_mode == "main"
         assert "list_tracks" not in [c for c, _ in fake.calls]
 
-    def test_all_needs_no_track_list(self, run):
+    def test_all_expects_one_file_per_track_plus_the_main_mix(self, run):
+        # 3 tracks and a return, and the Main mix under the plain name
         out, fake, seen = run(tools.export.export_audio, fake=abl(), rendered_track="all")
         assert seen["request"].track_mode == "all"
-        assert "list_tracks" not in [c for c, _ in fake.calls]
+        assert seen["request"].expected_files == 5
+
+    def test_all_does_not_check_the_file_count_when_the_set_has_a_group_track(self, run):
+        rows = TRACKS["tracks"] + [{"index": 5, "name": "Bus", "kind": "group"}]
+        out, fake, seen = run(tools.export.export_audio, fake=abl(list_tracks={"tracks": rows}),
+                              rendered_track="all")
+        assert seen["request"].expected_files is None
+
+    def test_all_with_no_tracks_listed_checks_nothing(self, run):
+        out, fake, seen = run(tools.export.export_audio, fake=abl(list_tracks={"tracks": []}),
+                              rendered_track="all")
+        assert seen["request"].expected_files is None
 
     def test_a_named_track_is_checked_against_the_set(self, run):
         out, fake, seen = run(tools.export.export_audio, fake=abl(), rendered_track="Guitar")
@@ -173,7 +185,8 @@ class TestRenderedTrackParameter:
     def test_the_names_of_live_s_own_entries_mean_the_entries(self, run, name, mode):
         out, fake, seen = run(tools.export.export_audio, fake=abl(), rendered_track=name)
         assert out["ok"] is True and seen["request"].track_mode == mode
-        assert "list_tracks" not in [c for c, _ in fake.calls]
+        assert (("list_tracks", {"include_returns": True, "include_master": False})
+                in fake.calls) is (mode == "all")
 
 
 class TestCompat:
@@ -239,7 +252,7 @@ class TestCompat:
         out, live, fake = self.run_real(tmp_path, monkeypatch, output_path=str(tmp_path / "mix.wav"),
                                         sample_rate=48000, rendered_track="all")
         assert out["ok"] is True, out
-        assert len(out["files"]) == len(out["output_files"]) == 2
+        assert len(out["files"]) == len(out["output_files"]) == 3   # two tracks and the Main mix
         assert all(f["duration_seconds"] == 3.0 and f["sample_rate"] == 48000 for f in out["files"])
 
     def test_the_documented_old_loop_restore_fields_are_gone(self, tmp_path, monkeypatch):

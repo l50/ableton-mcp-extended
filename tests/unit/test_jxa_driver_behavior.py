@@ -34,9 +34,6 @@ var WORLD = JSON.parse(process.argv[2]);
 var CLOCK = {now: 0, g: []};  // fake seconds; g: when each Cmd+Shift+G arrived
 var SHEET = WORLD.sheet || {};  // late: seconds before the sheet shows; ignore: shortcuts swallowed
 var ignored = 0;
-// Numeric fields take typed digits: pressing one starts an entry, digits
-// accumulate, Return commits the entry as the field's value.
-var TYPING = {field: null, buffer: ''};
 function delay(s) {
   CLOCK.now += s;
   if (FOCUS_READY_AT !== null && CLOCK.now >= FOCUS_READY_AT - 1e-9) {
@@ -94,6 +91,16 @@ function mk(spec) {
     return out;
   };
   o.actions = {byName: function (n) { return {perform: function () {
+    if ((n === 'AXIncrement' || n === 'AXDecrement') && spec.slider) {
+      // Like Live's sliders: one step each, wrapping (beats, sixteenths) or
+      // stopping at the end (bars).
+      LOG.nudges = (LOG.nudges || 0) + 1;
+      var sl = spec.slider, v = parseInt(spec.value, 10) + (n === 'AXIncrement' ? 1 : -1);
+      if (v > sl.max) v = sl.wrap ? sl.min : sl.max;
+      if (v < sl.min) v = sl.wrap ? sl.max : sl.min;
+      spec.value = String(v);
+      return;
+    }
     if (n !== 'AXPress') throw new Error('unsupported action ' + n);
     LOG.pressed.push(spec.description || spec.name);
     if (spec.press) ACTIONS[spec.press](o);
@@ -135,7 +142,6 @@ var ACTIONS = {
     });
   },
   toggle: function (sw) { sw.spec.value = sw.spec.value === 'On' ? 'Off' : 'On'; },
-  focusField: function (field) { TYPING.field = field; TYPING.buffer = ''; },
   // A Cancel button closes its window, unless a sheet on it blocks it.
   closeWindow: function (btn) {
     windows = windows.filter(function (w) {
@@ -220,11 +226,6 @@ function Application(name) {
     keyCode: function (code) {
       if (!FRONT || !KEYBOARD_FOCUS) { LOG.stray.push(code); return; }
       LOG.keys.push(code);
-      if (code === 36 && TYPING.field) {
-        TYPING.field.spec.value = TYPING.buffer;
-        TYPING.field = null;
-        return;
-      }
       if (code === 36) { CLOCK.done = true; windows.forEach(function (w) { w.sheets = []; }); }  // Return: go
       if (code === 53) {  // Esc: close a sheet, else a window that Esc cancels, else a menu
         var sheeted = windows.filter(function (w) { return w.sheets.length; });
@@ -239,7 +240,6 @@ function Application(name) {
     keystroke: function (k, opts) {
       if (!FRONT || !KEYBOARD_FOCUS) { LOG.stray.push(k); return; }
       LOG.keys.push(k);
-      if (TYPING.field && !(opts && opts.using)) { TYPING.buffer += k; return; }
       // Cmd+Shift+G opens the Go to Folder sheet on the Save panel, once the
       // world's slow-sheet settings allow it.
       if (k === 'g' && opts && (opts.using || []).indexOf('command down') >= 0) {
@@ -901,65 +901,75 @@ def test_cancel_does_not_send_esc_to_another_app():
 # ── Render Start / Render Length fields (issue 11) ───────────────
 
 
-def time_field_world(style="named", start=("1", "1", "1"), length=("4", "0", "0"), front="yes"):
-    """The Export dialog with its two bar.beat.sixteenth fields.
+def time_field_world(start=("34", "1", "1"), length=("0", "0", "1"), clamp_start_bar=True):
+    """The Export dialog's time sliders as Live 12.4.16 exposes them (observed on the second Mac).
 
-    style "named": each part is a text field described "Render Start Bars" and so on.
-    style "grouped": a group labelled "Render Start" holding three unlabelled text fields.
+    Each field is three AXSliders described "Start of Rendered Audio File (Bar)" and so on.
+    They take AXIncrement / AXDecrement steps; beats and sixteenths wrap, bars stop at their ends.
+    AXValue writes and clicks do nothing, and Return would press Export.
     """
-    def parts(label, values):
-        if style == "named":
-            return [{"role": "AXTextField", "description": f"{label} {unit}", "value": value,
-                     "press": "focusField"}
-                    for unit, value in zip(("Bars", "Beats", "Sixteenths"), values)]
-        return [{"role": "AXGroup", "name": label, "kids": [
-            {"role": "AXTextField", "value": value, "press": "focusField"} for value in values]}]
-    return {"front": front, "windows": [
-        {"role": "AXWindow", "subrole": "AXDialog", "name": "Export Audio/Video", "kids":
-            parts("Render Start", start) + parts("Render Length", length)
-            + [{"role": "AXButton", "description": "Cancel"}]},
+    def sliders(prefix, values, first_bar, wrap_max):
+        return [{"role": "AXSlider", "description": f"{prefix} ({unit})", "value": value,
+                 "slider": {"min": lo, "max": hi, "wrap": unit != "Bar"}}
+                for unit, value, (lo, hi) in zip(
+                    ("Bar", "Beat", "Sixteenths"), values,
+                    [(first_bar, 9999), (first_bar if first_bar else 0, wrap_max),
+                     (first_bar if first_bar else 0, wrap_max)])]
+    kids = (sliders("Start of Rendered Audio File", start, 1, 4)
+            + [{"role": "AXStaticText", "name": ".", "value": "."}]
+            + sliders("Length of Rendered Audio File", length, 0, 3)
+            + [{"role": "AXButton", "description": "Export"}, {"role": "AXButton", "description": "Cancel"}])
+    return {"windows": [
+        {"role": "AXWindow", "subrole": "AXDialog", "name": "Export Audio/Video", "kids": kids},
         {"role": "AXWindow", "subrole": "AXStandardWindow", "name": "Untitled"},
     ]}
 
 
-@pytest.mark.parametrize("style", ["named", "grouped"])
-def test_get_time_field_reads_the_three_parts_as_numbers(style):
-    world = time_field_world(style)
+def test_get_time_field_reads_the_three_parts_as_numbers():
+    world = time_field_world()
     start = drive("get_time_field", world, window="Export Audio/Video", label="Render Start")
     length = drive("get_time_field", world, window="Export Audio/Video", label="Render Length")
-    assert start["fields"] == [1, 1, 1] and length["fields"] == [4, 0, 0]
+    assert start["fields"] == [34, 1, 1] and length["fields"] == [0, 0, 1]
 
 
-@pytest.mark.parametrize("style", ["named", "grouped"])
-def test_set_time_field_types_each_changed_part_and_reads_the_field_back(style):
-    reply = drive("set_time_field", time_field_world(style), window="Export Audio/Video",
+def test_set_time_field_steps_each_part_to_its_value_without_a_key_or_a_click():
+    reply = drive("set_time_field", time_field_world(), window="Export Audio/Video",
                   label="Render Length", fields=[14, 0, 0])
     assert reply["ok"] is True, reply
-    assert reply["before"] == [4, 0, 0] and reply["after"] == [14, 0, 0]
-    # only the bars part differed, so only it was clicked and typed: "14", Return
-    assert reply["_log"]["keys"] == ["14", 36]
-    assert reply["_log"]["stray"] == []
+    assert reply["before"] == [0, 0, 1] and reply["after"] == [14, 0, 0]
+    log = reply["_log"]
+    # 14 bar steps up, then one step down for the sixteenths (1 -> 0)
+    assert log["nudges"] == 14 + 1
+    # Return in the dialog presses Export, so no key is ever sent
+    assert log["keys"] == [] and log["stray"] == [] and log["pressed"] == []
+
+
+def test_set_time_field_goes_down_for_a_smaller_value():
+    reply = drive("set_time_field", time_field_world(), window="Export Audio/Video",
+                  label="Render Start", fields=[1, 1, 1])
+    assert reply["before"] == [34, 1, 1] and reply["after"] == [1, 1, 1]
+    assert reply["_log"]["nudges"] == 33
+
+
+def test_set_time_field_wraps_beats_the_short_way_round():
+    reply = drive("set_time_field", time_field_world(), window="Export Audio/Video",
+                  label="Render Start", fields=[34, 4, 3])
+    assert reply["after"] == [34, 4, 3]
 
 
 def test_set_time_field_leaves_parts_that_already_match_alone():
     reply = drive("set_time_field", time_field_world(), window="Export Audio/Video",
-                  label="Render Start", fields=[1, 1, 1])
-    assert reply["before"] == reply["after"] == [1, 1, 1]
-    assert reply["_log"]["keys"] == [] and reply["_log"]["pressed"] == []
+                  label="Render Start", fields=[34, 1, 1])
+    assert reply["before"] == reply["after"] == [34, 1, 1]
+    assert reply["_log"].get("nudges", 0) == 0
 
 
-def test_set_time_field_types_all_three_parts_in_order():
+def test_a_value_the_slider_cannot_reach_is_an_error_not_a_loop():
+    # bars stop at their end: asking for bar 0 on the start (minimum 1) never changes
     reply = drive("set_time_field", time_field_world(), window="Export Audio/Video",
-                  label="Render Start", fields=[5, 3, 2])
-    assert reply["after"] == [5, 3, 2]
-    assert reply["_log"]["keys"] == ["5", 36, "3", 36, "2", 36]
-
-
-def test_set_time_field_sends_no_key_when_live_is_not_frontmost():
-    reply = drive("set_time_field", time_field_world(front="never"), window="Export Audio/Video",
-                  label="Render Length", fields=[14, 0, 0])
+                  label="Render Start", fields=[0, 1, 1])
     assert reply["ok"] is False
-    assert "not frontmost" in reply["error"] and reply["_log"]["keys"] == []
+    assert "Render Start bar stays at 1 and cannot be set to 0" in reply["error"]
 
 
 def test_a_field_with_other_than_three_parts_is_refused():
@@ -968,9 +978,14 @@ def test_a_field_with_other_than_three_parts_is_refused():
     assert reply["ok"] is False and "three parts" in reply["error"]
 
 
+def test_a_label_that_is_not_a_time_field_is_refused():
+    reply = drive("get_time_field", time_field_world(), window="Export Audio/Video", label="Sample Rate")
+    assert reply["ok"] is False and "is not a time field" in reply["error"]
+
+
 def test_fields_that_are_not_in_the_dialog_say_so_and_point_at_the_dump_op():
-    world = export_dialog_world()
-    reply = drive("get_time_field", world, window="Export Audio/Video", label="Render Start")
+    reply = drive("get_time_field", export_dialog_world(), window="Export Audio/Video",
+                  label="Render Start")
     assert reply["ok"] is False
     assert "three parts of 'Render Start' were not found" in reply["error"] and "dump" in reply["error"]
 
@@ -979,6 +994,6 @@ def test_dump_lists_every_element_of_a_window_with_its_labels_and_values():
     reply = drive("dump", time_field_world(), window="Export Audio/Video")
     assert reply["ok"] is True
     rows = {(e["role"], e["description"]): e["value"] for e in reply["elements"]}
-    assert rows[("AXTextField", "Render Start Bars")] == "1"
-    assert rows[("AXTextField", "Render Length Bars")] == "4"
+    assert rows[("AXSlider", "Start of Rendered Audio File (Bar)")] == "34"
+    assert rows[("AXSlider", "Length of Rendered Audio File (Sixteenths)")] == "1"
     assert ("AXButton", "Cancel") in rows
