@@ -983,17 +983,8 @@ def test_a_label_that_is_not_a_time_field_is_refused():
     assert reply["ok"] is False and "is not a time field" in reply["error"]
 
 
-def test_fields_that_are_not_in_the_dialog_say_so_and_point_at_the_dump_op():
+def test_fields_that_are_not_in_the_dialog_say_so():
     reply = drive("get_time_field", export_dialog_world(), window="Export Audio/Video",
                   label="Render Start")
     assert reply["ok"] is False
-    assert "three parts of 'Render Start' were not found" in reply["error"] and "dump" in reply["error"]
-
-
-def test_dump_lists_every_element_of_a_window_with_its_labels_and_values():
-    reply = drive("dump", time_field_world(), window="Export Audio/Video")
-    assert reply["ok"] is True
-    rows = {(e["role"], e["description"]): e["value"] for e in reply["elements"]}
-    assert rows[("AXSlider", "Start of Rendered Audio File (Bar)")] == "34"
-    assert rows[("AXSlider", "Length of Rendered Audio File (Sixteenths)")] == "1"
-    assert ("AXButton", "Cancel") in rows
+    assert reply["error"] == "the three parts of 'Render Start' were not found in 'Export Audio/Video'"

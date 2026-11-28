@@ -528,7 +528,7 @@ function timeFieldParts(w, label) {
   }
   for (var u = 0; u < 3; u++)
     if (!parts[u]) throw new Error("the three parts of '" + label + "' were not found in '" +
-      safe(function () { return w.name(); }, '') + "' (try the dump op)");
+      safe(function () { return w.name(); }, '') + "'");
   return parts;
 }
 function readParts(parts) {
@@ -547,21 +547,6 @@ function nudgeTo(el, target, what) {
     current = next;
   }
   if (current !== target) throw new Error(what + ' did not reach ' + target + ' in ' + MAX_NUDGES + ' steps');
-}
-function dumpWindow(w) {
-  var all = w.entireContents(), out = [];
-  for (var i = 0; i < all.length && out.length < 400; i++) {
-    var el = all[i];
-    out.push({role: safe(function () { return el.role(); }, ''),
-              description: safe(function () { return el.description(); }, ''),
-              title: safe(function () { return el.title(); }, ''),
-              name: safe(function () { return el.name(); }, ''),
-              value: String(safe(function () { return el.value(); }, '')),
-              position: safe(function () { return el.position(); }, null),
-              size: safe(function () { return el.size(); }, null),
-              enabled: safe(function () { return el.enabled(); }, null)});
-  }
-  return out;
 }
 function press(el) {
   try { el.actions.byName('AXPress').perform(); } catch (e) { SE.click(el); }
@@ -755,8 +740,6 @@ function dispatch(cmd) {
         nudgeTo(parts[i], cmd.fields[i], cmd.label + ' ' + TIME_UNITS[i].toLowerCase());
       return {before: before, after: readParts(parts)};
     }
-    case 'dump':
-      return {elements: dumpWindow(findWindow(p, cmd.window))};
     case 'texts': {
       // Every window with this name: a name does not single one out, and
       // Live's untitled windows all share the name ''.
@@ -1117,7 +1100,7 @@ class LiveExporter:
         for key in ("before", "after", "clicked", "pressed", "where", "replaced", "fields"):
             if key in result:
                 entry[key] = result[key]
-        if op not in ("status", "texts", "controls", "get_time_field", "dump"):
+        if op not in ("status", "texts", "controls", "get_time_field"):
             self.steps.append(entry)
         return result
 
