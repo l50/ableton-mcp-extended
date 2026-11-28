@@ -194,14 +194,17 @@ def export_audio(
     - render_timeout: Seconds to wait for the render to finish.
 
     Fails before touching Live when Live logs no audio output device (the
-    audio interface is unplugged), is already showing a dialog, or an earlier
-    call returned export_pending and Live is not yet shown clear of that export.
+    audio interface is unplugged), Live's UI is not safe to drive (Key Map or
+    MIDI Map mode, a dialog open, Computer MIDI Keyboard on, or playing or
+    recording; see get_ui_state), or an earlier call returned export_pending
+    and Live is not yet shown clear of that export.
 
     Returns JSON: {ok, status, output_path, output_files, expected_path,
     format, sample_rate, bit_depth, normalize, create_video, render_range,
     expected_seconds, rendered_seconds, length_verified, dialog_settings,
-    file_info, steps, warnings, export_pending, error?, dialog_text?,
-    loop_to_restore?}. On a failure after the Export dialog was asked for, the
+    file_info, steps, warnings, export_pending, selection_cleared?,
+    transport_unchanged?, error?, dialog_text?, loop_to_restore?}. On a failure
+    after the Export dialog was asked for, the
     dialogs are cancelled and export_pending is false only once Live shows no
     export window; when true, the export may still be running in Live and
     nothing in the Set was moved back. ok is true only when

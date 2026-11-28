@@ -36,7 +36,8 @@ def get_ui_state(ctx: Context) -> str:
     macOS only. Reads Live through accessibility (the app running this server
     needs Accessibility permission), plus the armed tracks from Live itself.
     Use it before driving Live's UI: the UI tools (export_audio, export_video,
-    save_set) call the same check and refuse when it says the UI is unsafe.
+    clear_selection, save_set, save_set_as) call the same check and refuse
+    when it says the UI is unsafe.
 
     Returns JSON: {ok, running, frontmost, set: {window_title, path},
     key_map_mode, midi_map_mode, computer_midi_keyboard, dialogs: [{name,
@@ -44,7 +45,7 @@ def get_ui_state(ctx: Context) -> str:
     ("arrangement", "session", "detail", "mixer", "browser", "control",
     "learn", "status", "dialog" or "unknown"), element, reason?}, transport: {playing,
     recording, arrangement_record, session_record, overdub, loop, punch_in,
-    punch_out}, time_selection: {present, reason?}, items_selected,
+    punch_out}, time_selection: {present, commands_enabled?, reason?}, items_selected,
     armed_tracks (null with armed_tracks_error when Live's Remote Script
     cannot be reached), unreadable, safe_to_drive, unsafe_reasons}.
 

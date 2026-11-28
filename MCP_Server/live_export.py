@@ -3,13 +3,14 @@
 Live's File > Export Audio/Video is not part of the Live Object Model, so the
 Remote Script cannot trigger it. This module drives the dialog from the host
 side instead, through macOS UI scripting (System Events, via JavaScript for
-Automation run by ``osascript``). It is the only UI-automation path in the
-server and is deliberately self-contained: the LOM tools never import it.
+Automation run by ``osascript``). ``live_ui_state`` and ``live_save`` share its
+``JXADriver``; the LOM tools never import it.
 
 Flow:
 
-1. Check Live is running, is not already showing a dialog and has an
-   audio output device (from its Log.txt), then bring it to the front.
+1. Check Live is running, is not already showing a dialog, has an audio
+   output device (from its Log.txt) and is in a UI state safe to drive
+   (``live_ui_state.require_safe_to_drive``), then bring it to the front.
 2. Optionally give the Arrangement keyboard focus (Navigate > Arrangement
    View) and run Edit > Select Loop, so the dialog pre-fills Render Start
    and Render Length from the loop brace.
@@ -21,6 +22,8 @@ Flow:
 6. Poll until the render window is gone and the output file has stopped
    growing, then check the file with ``afinfo``: sample rate, bit depth and,
    when the caller says how long the range should be, length.
+7. When the export is no longer pending, clear the Arrangement time selection
+   and check the transport is unchanged (``live_ui_state.finish_ui_tool``).
 
 If any step from 3 on fails, the Save panel and Export dialog are
 cancelled and the run waits until Live shows no window the export opened.

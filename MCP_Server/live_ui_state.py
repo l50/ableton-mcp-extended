@@ -466,7 +466,8 @@ def unsafe_reasons(state: dict[str, Any], ignore_transport: bool = False) -> lis
 
     Anything accessibility could not read counts as unsafe: the guard never
     assumes a mode is off. ``ignore_transport`` skips the playing/recording
-    checks for tools (saving) that do not care about the transport.
+    checks for post-tool cleanup (``finish_ui_tool``), which stops playback a
+    click started.
     """
     if state.get("ok") is False:
         return [f"could not read Live's UI through accessibility: {state.get('error')}"]
