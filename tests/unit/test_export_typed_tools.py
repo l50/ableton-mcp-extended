@@ -52,6 +52,14 @@ class TestTypedRangeParameters:
     def test_a_start_alone_runs_to_the_end_of_the_arrangement(self, run):
         out, fake, seen = run(tools.export.export_audio, fake=abl(), start_beat=8.0)
         assert (seen["request"].start_beats, seen["request"].length_beats) == (8.0, 56.5)
+        assert out["range_rounded"] is False
+
+    def test_a_start_alone_widens_an_off_grid_arrangement_end_and_marks_range_rounded(self, run):
+        info = {"transport": ARRANGEMENT["transport"],
+                "tracks": [{"arrangement_clips": [{"end_time": 10.1}]}]}
+        out, fake, seen = run(tools.export.export_audio, fake=abl(get_arrangement_info=info), start_bar=2)
+        assert (seen["request"].start_beats, seen["request"].length_beats) == (4.0, 6.25)
+        assert out["range_rounded"] is True
 
     def test_bars_win_over_beats(self, run):
         out, fake, seen = run(tools.export.export_audio, fake=abl(), start_bar=2, start_beat=100.0,

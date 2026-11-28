@@ -352,8 +352,11 @@ class TestStep4SaveAndWait:
         old.write_bytes(b"x" * 10)
         os.utime(old, (1.0, 1.0))
         (tmp_path / "other Bass.wav").write_bytes(b"y")
+        neighbor = tmp_path / "mix1.wav"
+        neighbor.write_bytes(b"z" * 10)
+        os.utime(neighbor, (clock.now(), clock.now()))
         live, exporter = make(clock, afinfo=afinfo_for(48000, WAV_24))
-        result = exporter.run(request(tmp_path, name="mix", rendered_track="all"))
+        result = exporter.run(request(tmp_path, name="mix", rendered_track="all", expected_files=3))
         assert result["ok"] is True, result
         assert [os.path.basename(p) for p in result["output_files"]] == [
             "mix Bass.wav", "mix Guitar.wav", "mix.wav"]

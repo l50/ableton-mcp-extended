@@ -165,6 +165,7 @@ def _plan_range(
                 / live_export.SIXTEENTHS_PER_BEAT
                 - start
             )
+            rounded = abs((start + length) - end) > GRID_EPSILON
     elif range_name == "arrangement":
         end = _arrangement_end_beats(info)
         if end <= 0:

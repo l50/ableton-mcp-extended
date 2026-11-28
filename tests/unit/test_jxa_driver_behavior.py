@@ -98,6 +98,14 @@ function mk(spec) {
       var sl = spec.slider, v = parseInt(spec.value, 10) + (n === 'AXIncrement' ? 1 : -1);
       if (v > sl.max) v = sl.wrap ? sl.min : sl.max;
       if (v < sl.min) v = sl.wrap ? sl.max : sl.min;
+      if (sl.nonzero_group && v === 0) {
+        var others = 0;
+        windows.forEach(function (w) { w.entireContents().forEach(function (c) {
+          if (c !== o && (c.spec.slider || {}).nonzero_group === sl.nonzero_group)
+            others += parseInt(c.spec.value, 10);
+        }); });
+        if (others === 0) return;
+      }
       spec.value = String(v);
       return;
     }
@@ -910,7 +918,8 @@ def time_field_world(start=("34", "1", "1"), length=("0", "0", "1"), clamp_start
     """
     def sliders(prefix, values, first_bar, wrap_max):
         return [{"role": "AXSlider", "description": f"{prefix} ({unit})", "value": value,
-                 "slider": {"min": lo, "max": hi, "wrap": unit != "Bar"}}
+                 "slider": {"min": lo, "max": hi, "wrap": unit != "Bar",
+                            "nonzero_group": None if first_bar else prefix}}
                 for unit, value, (lo, hi) in zip(
                     ("Bar", "Beat", "Sixteenths"), values,
                     [(first_bar, 9999), (first_bar if first_bar else 0, wrap_max),
@@ -949,6 +958,18 @@ def test_set_time_field_goes_down_for_a_smaller_value():
                   label="Render Start", fields=[1, 1, 1])
     assert reply["before"] == [34, 1, 1] and reply["after"] == [1, 1, 1]
     assert reply["_log"]["nudges"] == 33
+
+
+@pytest.mark.parametrize("initial,target", [
+    (("4", "0", "0"), [0, 2, 0]),
+    (("4", "0", "0"), [0, 0, 1]),
+    (("0", "2", "0"), [0, 0, 1]),
+])
+def test_set_time_field_steps_positive_targets_before_zeroing_larger_units(initial, target):
+    reply = drive("set_time_field", time_field_world(length=initial),
+                  window="Export Audio/Video", label="Render Length", fields=target)
+    assert reply["ok"] is True, reply
+    assert reply["after"] == target
 
 
 def test_set_time_field_wraps_beats_the_short_way_round():

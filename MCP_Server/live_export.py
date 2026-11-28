@@ -734,10 +734,10 @@ function dispatch(cmd) {
       var parts = timeFieldParts(w, cmd.label);
       if (cmd.fields.length !== 3) return {ok: false, error: 'a time field needs three parts'};
       var before = readParts(parts);
-      // Bars first: the shortest length (0.0.1) only lets a part go to 0 once
-      // a bar or beat is set.
-      for (var i = 0; i < 3; i++)
-        nudgeTo(parts[i], cmd.fields[i], cmd.label + ' ' + TIME_UNITS[i].toLowerCase());
+      for (var pass = 0; pass < 2; pass++)
+        for (var i = 0; i < 3; i++)
+          if ((cmd.fields[i] > 0) === (pass === 0))
+            nudgeTo(parts[i], cmd.fields[i], cmd.label + ' ' + TIME_UNITS[i].toLowerCase());
       return {before: before, after: readParts(parts)};
     }
     case 'texts': {
@@ -1604,7 +1604,8 @@ class LiveExporter:
         wanted = FORMAT_EXTENSIONS[request.format]
         found = []
         for name in sorted(os.listdir(request.directory)):
-            if not name.startswith(request.stem) or os.path.splitext(name)[1].lower() not in wanted:
+            stem, ext = os.path.splitext(name)
+            if (stem != request.stem and not stem.startswith(request.stem + " ")) or ext.lower() not in wanted:
                 continue
             full = os.path.join(request.directory, name)
             try:
