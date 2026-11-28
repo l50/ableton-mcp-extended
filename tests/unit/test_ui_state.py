@@ -324,3 +324,26 @@ def test_unreadable_system_events_error_is_not_read_as_live_not_running():
         "AppleEvent timed out. (-1712)"]
     with pytest.raises(u.UnsafeUIState, match="could not read Live's UI"):
         u.require_safe_to_drive(Busy())
+
+
+def test_crash_report_panel_is_reported_when_live_shows_it_and_does_not_block():
+    state = state_of(help_panel="Report a Crash")
+    assert state["crash_report_panel"] is True
+    assert state["safe_to_drive"] is True
+
+
+def test_crash_report_panel_is_false_for_the_ordinary_learn_view():
+    assert state_of()["crash_report_panel"] is False
+
+
+def test_crash_report_panel_is_unknown_without_the_set_window():
+    assert state_of(no_main=True)["crash_report_panel"] is None
+
+
+def test_unreadable_set_window_behind_a_dialog_says_so_once():
+    # Live still starting behind its crash-recovery dialog: no set window yet
+    state = state_of(no_main=True, dialogs=[CRASH_RECOVERY])
+    reasons = state["unsafe_reasons"]
+    assert len(reasons) == 2
+    assert any("Live is showing a dialog" in r and "Live quit unexpectedly" in r for r in reasons)
+    assert any("could not read the set window" in r for r in reasons)

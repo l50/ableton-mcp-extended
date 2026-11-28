@@ -40,7 +40,8 @@ def get_ui_state(ctx: Context) -> str:
     when it says the UI is unsafe.
 
     Returns JSON: {ok, running, frontmost, set: {window_title, path},
-    key_map_mode, midi_map_mode, computer_midi_keyboard, dialogs: [{name,
+    key_map_mode, midi_map_mode, computer_midi_keyboard, crash_report_panel,
+    dialogs: [{name,
     subrole, modal, sheets, text, buttons}], other_windows, focus: {view
     ("arrangement", "session", "detail", "mixer", "browser", "control",
     "learn", "status", "dialog" or "unknown"), element, reason?}, transport: {playing,
@@ -54,7 +55,9 @@ def get_ui_state(ctx: Context) -> str:
     Arrangement has focus. safe_to_drive is false in Key Map or MIDI Map
     mode, with any dialog open, while playing or recording, with Computer
     MIDI Keyboard on, or when something could not be read. It does not
-    refuse to run: it reports.
+    refuse to run: it reports. crash_report_panel is true while Live shows its
+    "Report a Crash" help panel (after a crash); it is a view, not a dialog, so
+    it does not make the UI unsafe.
     """
     try:
         state = live_ui_state.read_ui_state(armed_reader=armed_tracks_reader)

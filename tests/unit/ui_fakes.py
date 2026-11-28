@@ -34,6 +34,7 @@ class FakeUI:
         self.main_sheets = state.pop("main_sheets", [])
         self.unreadable = state.pop("unreadable", [])
         self.no_main = state.pop("no_main", False)
+        self.help_panel = state.pop("help_panel", "Learn View")
         self.edit_unreadable = state.pop("edit_unreadable", False)
         self.switch_values = state.pop("switch_values", {})
         # behaviours that make an action go wrong
@@ -92,7 +93,7 @@ class FakeUI:
             "ok": True, "running": True, "frontmost": True, "windows": windows,
             "main": None if self.no_main else {
                 "name": self.title, "document": self.document, "switches": switches,
-                "groups": ["Control", "Arrangement", "Mixer", "Device Detail"]},
+                "groups": ["Control", "Arrangement", "Mixer", "Device Detail", self.help_panel]},
             "focus": [{"role": "AXStaticText", "description": "Arrangement Editor", "name": "Timeline"},
                       {"role": "AXGroup", "description": "group", "name": self.focus_group},
                       {"role": "AXGroup", "description": "group", "name": ""},

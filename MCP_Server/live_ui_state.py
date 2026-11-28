@@ -64,6 +64,7 @@ FOCUS_GROUPS = {
     "Status": "status",
 }
 DETAIL_MARK = "Detail"
+CRASH_REPORT_GROUP = "Report a Crash"
 
 TRANSPORT_KEYS = (
     "playing",
@@ -373,6 +374,12 @@ def read_ui_state(
     state["dialogs"] = dialogs
     state["other_windows"] = others
 
+    # Live shows its crash report in the Learn View panel: the top-level group
+    # of the set window then carries the title "Report a Crash" (seen after a
+    # real crash; not a window and not modal, so it is reported, not refused).
+    groups = (main or {}).get("groups")
+    state["crash_report_panel"] = None if main is None else CRASH_REPORT_GROUP in (groups or [])
+
     state["focus"] = classify_focus(raw.get("focus") or [], (main or {}).get("name") or "")
     state["transport"] = _transport(switch)
 
@@ -402,6 +409,7 @@ def _empty_state(reason: str) -> dict[str, Any]:
         "key_map_mode": None,
         "midi_map_mode": None,
         "computer_midi_keyboard": None,
+        "crash_report_panel": None,
         "dialogs": [],
         "other_windows": [],
         "focus": {"view": "unknown", "element": None, "reason": reason},
@@ -474,19 +482,24 @@ def unsafe_reasons(state: dict[str, Any], ignore_transport: bool = False) -> lis
     if not state.get("running"):
         return ["Ableton Live is not running"]
     reasons: list[str] = []
+    # With no set window (Live is still starting behind a dialog) every switch is
+    # unreadable for that one reason; say it once, below, instead of six times.
+    no_set_window = any(
+        item.startswith("the set window") for item in state.get("unreadable") or []
+    )
     if state.get("key_map_mode") is True:
         reasons.append(
             "Key Map mode is on (every click assigns a key); turn it off with the Key button "
             "or Cmd+K"
         )
-    elif state.get("key_map_mode") is None:
+    elif state.get("key_map_mode") is None and not no_set_window:
         reasons.append("could not read whether Key Map mode is on, so clicks may assign keys")
     if state.get("midi_map_mode") is True:
         reasons.append(
             "MIDI Map mode is on (every click assigns a MIDI control); turn it off with the "
             "MIDI button or Cmd+M"
         )
-    elif state.get("midi_map_mode") is None:
+    elif state.get("midi_map_mode") is None and not no_set_window:
         reasons.append("could not read whether MIDI Map mode is on, so clicks may map controls")
     for dialog in state.get("dialogs") or []:
         text = " | ".join(dialog.get("text") or [])
@@ -501,11 +514,11 @@ def unsafe_reasons(state: dict[str, Any], ignore_transport: bool = False) -> lis
         transport = state.get("transport") or {}
         if transport.get("playing") is True:
             reasons.append("Live is playing; stop playback first")
-        elif transport.get("playing") is None:
+        elif transport.get("playing") is None and not no_set_window:
             reasons.append("could not read whether Live is playing")
         if transport.get("recording") is True:
             reasons.append("Live is recording (Arrangement Record or Session Record is on)")
-        elif transport.get("recording") is None:
+        elif transport.get("recording") is None and not no_set_window:
             reasons.append("could not read whether Live is recording")
     for item in state.get("unreadable") or []:
         if item == "windows" or item.startswith("the set window"):
