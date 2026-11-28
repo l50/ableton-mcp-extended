@@ -326,9 +326,9 @@ def export_audio(
     - render_range: what to render when no start or length is given. "arrangement" = bar 1
       to the end of the last arrangement clip; "loop" = the current loop brace (read, never
       moved); "selection" = whatever Live pre-fills in the dialog (the current time
-      selection). "arrangement" and "loop" refuse to run while Session clips override the
-      Arrangement (Back to Arrangement lit). A range read from the Set is widened to the
-      sixteenth-note grid the dialog counts in (range_rounded says so).
+      selection). "arrangement", "loop" and a named range refuse to run while Session clips
+      override the Arrangement (Back to Arrangement lit). A range read from the Set is
+      widened to the sixteenth-note grid the dialog counts in (range_rounded says so).
     - start_bar: Render start as a 1-based bar (1 = the start of the song). Takes
       precedence over start_beat.
     - start_beat: Render start in beats (0 = the start of the song). With a start or a
@@ -356,8 +356,8 @@ def export_audio(
     format, sample_rate, bit_depth, normalize, create_video, render_range,
     rendered_track, dialog_range, range_rounded?, expected_seconds, rendered_seconds,
     length_verified, dialog_settings, file_info, steps, warnings, export_pending,
-    selection_cleared?, transport_unchanged?, time_selection_after?, error?,
-    dialog_text?}. files has one row per rendered file: {path, size_bytes,
+    selection_cleared?, transport_unchanged?, time_selection_before?,
+    time_selection_after?, error?, dialog_text?}. files has one row per rendered file: {path, size_bytes,
     duration_seconds, sample_rate, bit_depth, channels, length_verified}; output_path is
     the first file (the only one unless rendered_track is "all"). dialog_range is the
     Render Start and Render Length Live showed when Export was pressed ({start, length,
