@@ -91,6 +91,24 @@ function mk(spec) {
     return out;
   };
   o.actions = {byName: function (n) { return {perform: function () {
+    if ((n === 'AXIncrement' || n === 'AXDecrement') && spec.slider) {
+      // Like Live's sliders: one step each, wrapping (beats, sixteenths) or
+      // stopping at the end (bars).
+      LOG.nudges = (LOG.nudges || 0) + 1;
+      var sl = spec.slider, v = parseInt(spec.value, 10) + (n === 'AXIncrement' ? 1 : -1);
+      if (v > sl.max) v = sl.wrap ? sl.min : sl.max;
+      if (v < sl.min) v = sl.wrap ? sl.max : sl.min;
+      if (sl.nonzero_group && v === 0) {
+        var others = 0;
+        windows.forEach(function (w) { w.entireContents().forEach(function (c) {
+          if (c !== o && (c.spec.slider || {}).nonzero_group === sl.nonzero_group)
+            others += parseInt(c.spec.value, 10);
+        }); });
+        if (others === 0) return;
+      }
+      spec.value = String(v);
+      return;
+    }
     if (n !== 'AXPress') throw new Error('unsupported action ' + n);
     LOG.pressed.push(spec.description || spec.name);
     if (spec.press) ACTIONS[spec.press](o);
@@ -886,3 +904,108 @@ def test_cancel_does_not_send_esc_to_another_app():
     assert reply["ok"] is False
     assert "was not frontmost" in reply["error"]
     assert reply["_log"]["keys"] == [] and reply["_log"]["stray"] == []
+
+
+# ── Render Start / Render Length fields (issue 11) ───────────────
+
+
+def time_field_world(start=("34", "1", "1"), length=("0", "0", "1"), clamp_start_bar=True):
+    """The Export dialog's time sliders as Live 12.4.16 exposes them (observed on the second Mac).
+
+    Each field is three AXSliders described "Start of Rendered Audio File (Bar)" and so on.
+    They take AXIncrement / AXDecrement steps; beats and sixteenths wrap, bars stop at their ends.
+    AXValue writes and clicks do nothing, and Return would press Export.
+    """
+    def sliders(prefix, values, first_bar, wrap_max):
+        return [{"role": "AXSlider", "description": f"{prefix} ({unit})", "value": value,
+                 "slider": {"min": lo, "max": hi, "wrap": unit != "Bar",
+                            "nonzero_group": None if first_bar else prefix}}
+                for unit, value, (lo, hi) in zip(
+                    ("Bar", "Beat", "Sixteenths"), values,
+                    [(first_bar, 9999), (first_bar if first_bar else 0, wrap_max),
+                     (first_bar if first_bar else 0, wrap_max)])]
+    kids = (sliders("Start of Rendered Audio File", start, 1, 4)
+            + [{"role": "AXStaticText", "name": ".", "value": "."}]
+            + sliders("Length of Rendered Audio File", length, 0, 3)
+            + [{"role": "AXButton", "description": "Export"}, {"role": "AXButton", "description": "Cancel"}])
+    return {"windows": [
+        {"role": "AXWindow", "subrole": "AXDialog", "name": "Export Audio/Video", "kids": kids},
+        {"role": "AXWindow", "subrole": "AXStandardWindow", "name": "Untitled"},
+    ]}
+
+
+def test_get_time_field_reads_the_three_parts_as_numbers():
+    world = time_field_world()
+    start = drive("get_time_field", world, window="Export Audio/Video", label="Render Start")
+    length = drive("get_time_field", world, window="Export Audio/Video", label="Render Length")
+    assert start["fields"] == [34, 1, 1] and length["fields"] == [0, 0, 1]
+
+
+def test_set_time_field_steps_each_part_to_its_value_without_a_key_or_a_click():
+    reply = drive("set_time_field", time_field_world(), window="Export Audio/Video",
+                  label="Render Length", fields=[14, 0, 0])
+    assert reply["ok"] is True, reply
+    assert reply["before"] == [0, 0, 1] and reply["after"] == [14, 0, 0]
+    log = reply["_log"]
+    # 14 bar steps up, then one step down for the sixteenths (1 -> 0)
+    assert log["nudges"] == 14 + 1
+    # Return in the dialog presses Export, so no key is ever sent
+    assert log["keys"] == [] and log["stray"] == [] and log["pressed"] == []
+
+
+def test_set_time_field_goes_down_for_a_smaller_value():
+    reply = drive("set_time_field", time_field_world(), window="Export Audio/Video",
+                  label="Render Start", fields=[1, 1, 1])
+    assert reply["before"] == [34, 1, 1] and reply["after"] == [1, 1, 1]
+    assert reply["_log"]["nudges"] == 33
+
+
+@pytest.mark.parametrize("initial,target", [
+    (("4", "0", "0"), [0, 2, 0]),
+    (("4", "0", "0"), [0, 0, 1]),
+    (("0", "2", "0"), [0, 0, 1]),
+])
+def test_set_time_field_steps_positive_targets_before_zeroing_larger_units(initial, target):
+    reply = drive("set_time_field", time_field_world(length=initial),
+                  window="Export Audio/Video", label="Render Length", fields=target)
+    assert reply["ok"] is True, reply
+    assert reply["after"] == target
+
+
+def test_set_time_field_wraps_beats_the_short_way_round():
+    reply = drive("set_time_field", time_field_world(), window="Export Audio/Video",
+                  label="Render Start", fields=[34, 4, 3])
+    assert reply["after"] == [34, 4, 3]
+
+
+def test_set_time_field_leaves_parts_that_already_match_alone():
+    reply = drive("set_time_field", time_field_world(), window="Export Audio/Video",
+                  label="Render Start", fields=[34, 1, 1])
+    assert reply["before"] == reply["after"] == [34, 1, 1]
+    assert reply["_log"].get("nudges", 0) == 0
+
+
+def test_a_value_the_slider_cannot_reach_is_an_error_not_a_loop():
+    # bars stop at their end: asking for bar 0 on the start (minimum 1) never changes
+    reply = drive("set_time_field", time_field_world(), window="Export Audio/Video",
+                  label="Render Start", fields=[0, 1, 1])
+    assert reply["ok"] is False
+    assert "Render Start bar stays at 1 and cannot be set to 0" in reply["error"]
+
+
+def test_a_field_with_other_than_three_parts_is_refused():
+    reply = drive("set_time_field", time_field_world(), window="Export Audio/Video",
+                  label="Render Length", fields=[14, 0])
+    assert reply["ok"] is False and "three parts" in reply["error"]
+
+
+def test_a_label_that_is_not_a_time_field_is_refused():
+    reply = drive("get_time_field", time_field_world(), window="Export Audio/Video", label="Sample Rate")
+    assert reply["ok"] is False and "is not a time field" in reply["error"]
+
+
+def test_fields_that_are_not_in_the_dialog_say_so():
+    reply = drive("get_time_field", export_dialog_world(), window="Export Audio/Video",
+                  label="Render Start")
+    assert reply["ok"] is False
+    assert reply["error"] == "the three parts of 'Render Start' were not found in 'Export Audio/Video'"

@@ -151,31 +151,33 @@ def test_preflight_no_audio_device_leaves_nothing_to_clean_up(clock, tmp_path):
 
 def test_export_leaves_no_selection_success_path(clock, tmp_path):
     live, exporter = make(clock)
-    result = exporter.run(request(tmp_path, select_loop=True))
+    result = exporter.run(request(tmp_path))
     assert result["ok"] is True, result
     assert live.time_selection is False
     assert result["selection_cleared"] is True and result["transport_unchanged"] is True
-    assert [m["path"] for m in live.driven("menu")][-1] == ["Playback", "Move Insert Marker To Playhead"]
+    # The export made no selection, so nothing had to be cleared: the only
+    # menu item clicked is the one that opens the dialog.
+    assert [m["path"] for m in live.driven("menu")] == [["File", "Export Audio/Video"]]
 
 
 def test_export_leaves_no_selection_success_path_even_for_a_selection_made_by_the_user(clock, tmp_path):
     live, exporter = make(clock, time_selection=True)
-    result = exporter.run(request(tmp_path, select_loop=False))
+    result = exporter.run(request(tmp_path))
     assert result["ok"] is True, result
     assert live.time_selection is False and result["selection_cleared"] is True
 
 
 def test_export_leaves_no_selection_success_path_and_playback_a_click_started_is_stopped(clock, tmp_path):
-    live, exporter = make(clock, marker_starts_playback=True)
-    result = exporter.run(request(tmp_path, select_loop=True))
+    live, exporter = make(clock, marker_starts_playback=True, time_selection=True)
+    result = exporter.run(request(tmp_path))
     assert result["ok"] is True
     assert live.playing is False and result["transport_unchanged"] is True
     assert "playback started during the export and was stopped" in result["warnings"]
 
 
 def test_export_leaves_no_selection_failure_path(clock, tmp_path):
-    live, exporter = make(clock, dialog_appears=False)
-    result = exporter.run(request(tmp_path, select_loop=True))
+    live, exporter = make(clock, dialog_appears=False, time_selection=True)
+    result = exporter.run(request(tmp_path))
     assert result["ok"] is False and result["export_pending"] is False
     assert live.time_selection is False
     assert result["selection_cleared"] is True and result["transport_unchanged"] is True
@@ -192,8 +194,8 @@ def test_export_leaves_no_selection_failure_path(clock, tmp_path):
 def test_export_leaves_no_selection_pending_path_reports_it_could_not_clean_up(
     behaviour, clock, tmp_path
 ):
-    live, exporter = make(clock, **behaviour)
-    result = exporter.run(request(tmp_path, select_loop=True))
+    live, exporter = make(clock, time_selection=True, **behaviour)
+    result = exporter.run(request(tmp_path))
     assert result["export_pending"] is True
     assert live.time_selection is True
     assert result["selection_cleared"] is False
@@ -203,7 +205,7 @@ def test_export_leaves_no_selection_pending_path_reports_it_could_not_clean_up(
 
 
 def test_export_leaves_no_selection_failure_path_when_the_cleanup_cannot_run(clock, tmp_path):
-    live, exporter = make(clock)
+    live, exporter = make(clock, time_selection=True)
     original = live.op_ui_state
     calls = []
 
@@ -215,7 +217,7 @@ def test_export_leaves_no_selection_failure_path_when_the_cleanup_cannot_run(clo
         return original()
 
     live.op_ui_state = flaky
-    result = exporter.run(request(tmp_path, select_loop=True))
+    result = exporter.run(request(tmp_path))
     assert result["ok"] is True  # the file is what decides the render
     assert result["selection_cleared"] is False
     assert any("Live was not left clean" in w for w in result["warnings"])
@@ -232,7 +234,7 @@ def test_export_transport_change_during_the_export_is_reported_unchanged_false(c
         return reply
 
     live.op_menu = menu
-    result = exporter.run(request(tmp_path, select_loop=True))
+    result = exporter.run(request(tmp_path))
     assert result["transport_unchanged"] is False
     assert any("loop changed from False to True" in w for w in result["warnings"])
 

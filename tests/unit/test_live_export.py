@@ -75,7 +75,8 @@ class FakeClock:
 
 def default_controls():
     return {
-        le.RENDERED_TRACK: {"kind": "choice", "value": "Master Bus", "options": ["Main", "All Individual Tracks"]},
+        le.RENDERED_TRACK: {"kind": "choice", "value": "Master Bus",
+                            "options": ["Main", "All Individual Tracks", "Guitar", "Bass"]},
         le.ENCODE_PCM: {"kind": "toggle", "value": False},
         le.FILE_TYPE: {"kind": "choice", "value": "AIFF", "options": ["WAV", "AIFF", "FLAC"]},
         le.BIT_DEPTH: {"kind": "choice", "value": "16", "options": ["16", "24", "32"]},
@@ -101,14 +102,18 @@ class FakeLive:
         self.calls = []
         self.running = True
         self.frontmost = False
-        self.arrangement_focused = False
         self.windows = [fake_window("My Song", "AXStandardWindow")]
         self.controls = default_controls()
+        # Render Start / Render Length as the dialog pre-fills them (the loop
+        # brace, say): bar.beat.sixteenth, typed values replace them.
+        self.fields = {"Render Start": [1, 1, 1], "Render Length": [4, 0, 0]}
+        self.typed = []                # (label, fields) in the order typed
         self.render_bytes = b"RIFF" + b"\0" * 64
         self.render_polls = 1          # status polls before the file appears
         self.extra_render_files = []   # e.g. a video written beside the audio
         self.b = dict(behaviour)
         self._rendering = None
+        self.render_complete = False
         # What Live's UI shows besides the export dialogs (get_ui_state reads it).
         self.key_map = self.b.get("key_map", False)
         self.midi_map = self.b.get("midi_map", False)
@@ -209,24 +214,15 @@ class FakeLive:
             if self.b.get("dialog_appears", True):
                 self.open_window(le.EXPORT_DIALOG_TITLE)
             return {"ok": True, "clicked": "Export Audio/Video..."}
-        if path[0] == le.NAVIGATE_MENU:
-            state = self.b.get("arrangement_focus", "ok")
-            if state == "missing":
-                return {"ok": False, "missing": True, "error": "menu item 'Navigate > Arrangement View' not found"}
-            if state == "disabled":
-                return {"ok": False, "disabled": True, "error": "menu item 'Navigate > Arrangement View' is disabled"}
-            self.arrangement_focused = True
-            return {"ok": True, "clicked": "Arrangement View"}
         if path[0] == "Playback":
             self.time_selection = False
             if self.b.get("marker_starts_playback"):
                 self.playing = True
             return {"ok": True, "clicked": path[1]}
-        # Live only enables Select Loop while the Arrangement has keyboard focus.
-        if not self.arrangement_focused or self.b.get("select_loop_disabled"):
-            return {"ok": False, "disabled": True, "error": "menu item 'Edit > Select Loop' is disabled"}
-        self.time_selection = True
-        return {"ok": True, "clicked": "Select Loop"}
+        # Any other menu item (Edit > Select Loop, Navigate > Arrangement View,
+        # ...) is something the export must never click: record and refuse.
+        self.unexpected_menu = getattr(self, "unexpected_menu", []) + [list(path)]
+        return {"ok": False, "error": f"menu item '{' > '.join(path)}' was not expected"}
 
     def op_keystroke(self, key, modifiers):
         if self.b.get("dialog_appears", True):
@@ -278,6 +274,28 @@ class FakeLive:
             c["value"], c["index"] = options[index], index
         return {"ok": True, "before": before, "after": c["value"],
                 "seen": options[:index + 1], "picked": options[index]}
+
+    def op_get_time_field(self, window, label):
+        missing = self._window_or_error(window)
+        if missing:
+            return missing
+        if self.b.get("fields_unreadable"):
+            return {"ok": False, "error": f"the three parts of '{label}' were not found in '{window}'"}
+        return {"ok": True, "fields": list(self.fields[label])}
+
+    def op_set_time_field(self, window, label, fields):
+        missing = self._window_or_error(window)
+        if missing:
+            return missing
+        self.typed.append((label, list(fields)))
+        if self.b.get("fields_unreadable"):
+            return {"ok": False, "error": f"the three parts of '{label}' were not found in '{window}'"}
+        before = list(self.fields[label])
+        if label not in self.b.get("stuck_fields", ()):
+            self.fields[label] = list(fields)
+        if self.b.get("start_follows_length") and label == "Render Length":
+            self.fields["Render Start"] = [1, 1, 1]
+        return {"ok": True, "before": before, "after": list(self.fields[label])}
 
     def op_controls(self, window):
         out = []
@@ -334,12 +352,30 @@ class FakeLive:
             self.close_window(le.EXPORT_DIALOG_TITLE)
         ext = self.b.get("written_ext", ".wav")
         self._rendering = {
-            "path": os.path.join(directory, filename + ext),
+            "paths": self._output_paths(directory, filename, ext),
             "polls": 0,
             "progress": self.open_window("", subrole="AXUnknown"),
             "alerted": False,
         }
+        self.render_complete = False
         return {"ok": True, "where": folder_name, "replaced": bool(replace)}
+
+    def _output_paths(self, directory, filename, ext):
+        chooser = self.controls[le.RENDERED_TRACK]
+        if chooser["value"] == "All Individual Tracks":
+            # One file per track, beside the name typed in the Save panel.
+            # (and the Main mix under the plain name, as Live does)
+            return [os.path.join(directory, f"{filename} {t}{ext}") for t in chooser["options"][2:]] \
+                + [os.path.join(directory, filename + ext)]
+        if chooser["value"] not in ("Master Bus", "Main", "Master"):
+            # one track: Live adds the track's name to the name from the Save panel
+            return [os.path.join(directory, f"{filename} {chooser['value']}{ext}")]
+        return [os.path.join(directory, filename + ext)]
+
+    def _write(self, path, data):
+        with open(path, "wb") as f:
+            f.write(data)
+        os.utime(path, (self.clock.now(), self.clock.now()))
 
     def _tick_render(self):
         r = self._rendering
@@ -353,18 +389,21 @@ class FakeLive:
                 self.open_window(name, texts=texts)
                 r["alerted"] = True
             return
+        grow = self.b.get("grow_polls", 0)
         if r["polls"] >= self.render_polls and not self.b.get("never_writes"):
-            if r["polls"] == self.render_polls:
-                with open(r["path"], "wb") as f:
-                    f.write(self.render_bytes)
-                os.utime(r["path"], (self.clock.now(), self.clock.now()))
+            step = r["polls"] - self.render_polls
+            if step <= grow:
+                # Files grow while Live renders, then keep their final size.
+                for path in r["paths"]:
+                    self._write(path, self.render_bytes + b"\0" * (grow - step) * 100)
+            if step == 0:
                 for path, data in self.extra_render_files:
-                    with open(path, "wb") as f:
-                        f.write(data)
-                    os.utime(path, (self.clock.now(), self.clock.now()))
-            if not self.b.get("window_stays") and r["polls"] >= self.render_polls + 1:
+                    self._write(path, data)
+            if not self.b.get("window_stays") and step >= grow + 1:
                 self.windows = [w for w in self.windows
                                 if w is not r["progress"] and w["name"] != le.EXPORT_DIALOG_TITLE]
+                self.render_complete = True
+                self._rendering = None
 
 
 @pytest.fixture
@@ -569,19 +608,16 @@ class TestExportSuccess:
         assert result["ok"] is True, result
         assert result["output_path"] == str(tmp_path / "song.aif")
 
-    def test_loop_range_focuses_arrangement_then_selects_loop_then_opens_dialog(self, tmp_path, clock):
-        # The fake, like Live, keeps Select Loop disabled until the Arrangement
-        # has keyboard focus, so the export only works in this order.
+    def test_export_clicks_only_the_export_menu_item(self, tmp_path, clock):
+        # No Select Loop and no Navigate: the dialog opens straight from File.
         live, exporter = make(clock)
-        result = exporter.run(request(tmp_path, select_loop=True))
+        result = exporter.run(request(tmp_path))
         assert result["ok"] is True, result
-        assert [m["path"] for m in live.driven("menu")] == [
-            ["Navigate", "Arrangement View"], ["Edit", "Select Loop"], ["File", "Export Audio/Video"],
-            ["Playback", "Move Insert Marker To Playhead"],  # clears the selection afterwards
-        ]
+        assert [m["path"] for m in live.driven("menu")] == [["File", "Export Audio/Video"]]
         assert [s.get("clicked") for s in result["steps"] if s["op"] == "menu"] == [
-            "Arrangement View", "Select Loop", "Export Audio/Video...",
+            "Export Audio/Video...",
         ]
+        assert result["selection_cleared"] is True and result["transport_unchanged"] is True
 
     @pytest.mark.parametrize("track_name", ["Master", "Main"])
     def test_rendered_track_ends_on_the_top_entry_not_a_track_of_that_name(self, tmp_path, clock, track_name):
@@ -765,28 +801,6 @@ class TestExportFailure:
         live, exporter = make(clock, comes_to_front=False)
         self.assert_failed(exporter.run(request(tmp_path)), "export needs Live frontmost")
         assert "menu" not in live.ops()
-
-    @pytest.mark.parametrize("state,reason", [
-        ("missing", "menu item 'Navigate > Arrangement View' not found"),
-        ("disabled", "menu item 'Navigate > Arrangement View' is disabled"),
-    ])
-    def test_arrangement_focus_unavailable(self, tmp_path, clock, state, reason):
-        live, exporter = make(clock, arrangement_focus=state)
-        self.assert_failed(exporter.run(request(tmp_path, select_loop=True)),
-                           "could not give the Arrangement keyboard focus: " + reason)
-        # Neither the loop is selected nor the dialog opened on an unfocused view.
-        assert [m["path"] for m in live.driven("menu")] == [["Navigate", "Arrangement View"]]
-        assert le.EXPORT_DIALOG_TITLE not in live.names()
-
-    def test_select_loop_unavailable(self, tmp_path, clock):
-        live, exporter = make(clock, select_loop_disabled=True)
-        self.assert_failed(exporter.run(request(tmp_path, select_loop=True)),
-                           "could not select the loop for the render range: "
-                           "menu item 'Edit > Select Loop' is disabled")
-        assert [m["path"] for m in live.driven("menu")] == [
-            ["Navigate", "Arrangement View"], ["Edit", "Select Loop"],
-        ]
-        assert le.EXPORT_DIALOG_TITLE not in live.names()
 
     def test_export_menu_disabled(self, tmp_path, clock):
         live, exporter = make(clock, export_menu="disabled")

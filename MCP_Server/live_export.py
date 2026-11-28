@@ -11,30 +11,34 @@ Flow:
 1. Check Live is running, is not already showing a dialog, has an audio
    output device (from its Log.txt) and is in a UI state safe to drive
    (``live_ui_state.require_safe_to_drive``), then bring it to the front.
-2. Optionally give the Arrangement keyboard focus (Navigate > Arrangement
-   View) and run Edit > Select Loop, so the dialog pre-fills Render Start
-   and Render Length from the loop brace.
-3. Open File > Export Audio/Video (falling back to Cmd+Shift+R).
-4. Set the dialog's controls (Rendered Track, Encode PCM / MP3, File Type,
-   Bit Depth, Sample Rate, Normalize, Create Video), re-reading each one and
-   failing if it did not take.
-5. Press Export, then fill in the macOS Save panel (folder and file name).
-6. Poll until the render window is gone and the output file has stopped
-   growing, then check the file with ``afinfo``: sample rate, bit depth and,
+2. Open File > Export Audio/Video (falling back to Cmd+Shift+R). Nothing
+   else is clicked first: the Arrangement's selection and the loop brace are
+   not touched, so the dialog's Render Start and Render Length are typed in
+   rather than pre-filled from a selection.
+3. Set the dialog's controls (Rendered Track: Main, a named track or All
+   Individual Tracks; Encode PCM / MP3, File Type, Bit Depth, Sample Rate,
+   Normalize, Create Video), re-reading each one and failing if it did not
+   take. Then type Render Start and Render Length into their bar, beat and
+   sixteenth fields and read both back; a field that did not take its value
+   fails the export before Export is pressed.
+4. Press Export, then fill in the macOS Save panel (folder and file name).
+5. Poll until the render window is gone and every output file has stopped
+   growing, then check each file with ``afinfo``: sample rate, bit depth and,
    when the caller says how long the range should be, length.
-7. When the export is no longer pending, clear the Arrangement time selection
-   and check the transport is unchanged (``live_ui_state.finish_ui_tool``).
+6. When the export is no longer pending, check the transport is unchanged and
+   that no time selection exists (``live_ui_state.finish_ui_tool`` clears one
+   a click left behind).
 
-If any step from 3 on fails, the Save panel and Export dialog are
+If any step from 2 on fails, the Save panel and Export dialog are
 cancelled and the run waits until Live shows no window the export opened.
 When that cannot be confirmed, the result says ``export_pending``: Live may
-still be exporting, so the caller must not change the Set (the loop brace
-above all, which can stall a render at 0%) until it is clear.
+still be exporting, so the caller must not change the Set until it is clear.
+Nothing is restored or changed while a render may be pending.
 
 A run that cannot prove the output file was written is a failure. Nothing
 here reports success from the UI alone. Render Start and Render Length are
-never read back from the dialog, so the file's length is the only evidence
-of which range Live rendered.
+read back from the dialog before Export, and the file's length is checked
+afterwards against the range that was typed.
 
 The control labels come from Live 12's accessibility tree (the descriptions
 VoiceOver reads), e.g. the Sample Rate chooser is an ``AXPopUpButton``
@@ -66,16 +70,13 @@ EXPORT_DIALOG_TITLE = "Export Audio/Video"
 SAVE_PANEL_TITLE = "Save"
 FILE_MENU = "File"
 EXPORT_MENU_ITEM = "Export Audio/Video"
-EDIT_MENU = "Edit"
-SELECT_LOOP_MENU_ITEM = "Select Loop"
-# Live's "Move Focus to the Arrangement View" command (Option+2).
-NAVIGATE_MENU = "Navigate"
-ARRANGEMENT_VIEW_MENU_ITEM = "Arrangement View"
 # Live's documented shortcut for File > Export Audio/Video (manual 5.1.3).
 EXPORT_SHORTCUT = {"key": "r", "modifiers": ["command down", "shift down"]}
 
 # Accessibility descriptions of the Export dialog controls (Live 12).
 RENDERED_TRACK = "Rendered Track Chooser"
+RENDER_START = "Render Start"
+RENDER_LENGTH = "Render Length"
 ENCODE_PCM = "Encode PCM"
 FILE_TYPE = "File Type"
 BIT_DEPTH = "Recording Bit Depth"
@@ -88,6 +89,10 @@ CANCEL_BUTTON = "Cancel"
 
 # Live calls the master bus "Main" from Live 12 on and "Master" before that.
 MAIN_TRACK_VALUES = ["Main", "Master"]
+# The Rendered Track chooser's entry that renders one file per track.
+ALL_TRACKS_ENTRY = "All Individual Tracks"
+RENDERED_TRACK_ALL = "all"
+RENDERED_TRACK_MAIN = "main"
 
 PCM_FORMATS = {"wav": "WAV", "aiff": "AIFF", "flac": "FLAC"}
 FORMATS = ("wav", "aiff", "flac", "mp3")
@@ -130,6 +135,50 @@ STABLE_POLLS = 3
 # Slack between the rendered and the expected length: covers MP3 encoder
 # padding and the dialog's sixteenth-note resolution at any normal tempo.
 LENGTH_TOLERANCE_SECONDS = 0.5
+# A beat in Live's song time is a quarter note; the dialog counts in sixteenths.
+SIXTEENTHS_PER_BEAT = 4
+SIXTEENTHS_PER_WHOLE_NOTE = 16
+
+
+# ── bar, beat and sixteenth fields ───────────────────────────────
+
+
+def _sixteenths_per_beat(signature: Tuple[int, int]) -> int:
+    """Sixteenth notes in one beat of the signature (a beat is 1/denominator of a whole note)."""
+    return SIXTEENTHS_PER_WHOLE_NOTE // int(signature[1])
+
+
+def beats_to_fields(
+    beats: float, signature: Tuple[int, int], one_based: bool
+) -> Tuple[int, int, int]:
+    """Quarter-note beats as the (bar, beat, sixteenth) Live's dialog fields show.
+
+    Render Start counts from 1.1.1 (``one_based``); Render Length counts from
+    0.0.0, so 14 bars in 4/4 is 14.0.0. ``beats`` must be a whole number of
+    sixteenths; the caller has checked.
+    """
+    per_beat = _sixteenths_per_beat(signature)
+    per_bar = int(signature[0]) * per_beat
+    total = int(round(beats * SIXTEENTHS_PER_BEAT))
+    bars, rest = divmod(total, per_bar)
+    beat, sixteenth = divmod(rest, per_beat)
+    offset = 1 if one_based else 0
+    return bars + offset, beat + offset, sixteenth + offset
+
+
+def fields_to_beats(
+    fields: Sequence[int], signature: Tuple[int, int], one_based: bool
+) -> float:
+    """The inverse of ``beats_to_fields``: dialog fields back to quarter-note beats."""
+    per_beat = _sixteenths_per_beat(signature)
+    per_bar = int(signature[0]) * per_beat
+    offset = 1 if one_based else 0
+    bars, beat, sixteenth = (int(v) - offset for v in fields)
+    return (bars * per_bar + beat * per_beat + sixteenth) / SIXTEENTHS_PER_BEAT
+
+
+def format_fields(fields: Sequence[int]) -> str:
+    return ".".join(str(int(v)) for v in fields)
 
 
 class ExportError(Exception):
@@ -152,19 +201,81 @@ class ExportRequest:
     sample_rate: int = 44100
     bit_depth: int = 24
     normalize: bool = False
-    select_loop: bool = False
     create_video: bool = False
     overwrite: bool = False
     render_timeout: float = DEFAULT_RENDER_TIMEOUT
     dialog_timeout: float = DEFAULT_DIALOG_TIMEOUT
-    # How long the rendered file should be, when the caller knows the range.
+    # How long each rendered file should be, when the caller knows the range.
     expected_seconds: Optional[float] = None
+    # What the Rendered Track chooser is set to: "Main" (Live's own bus), the
+    # name of one track, or "all" (All Individual Tracks: one file per track).
+    rendered_track: str = "Main"
+    # The range typed into Render Start / Render Length, in beats from the
+    # start of the song; both or neither. Neither leaves the dialog's own
+    # pre-filled range alone (the current time selection).
+    start_beats: Optional[float] = None
+    length_beats: Optional[float] = None
+    # The Set's time signature, which sets what a bar and a beat are in the
+    # dialog's bar.beat.sixteenth fields.
+    signature: Tuple[int, int] = (4, 4)
+    # For rendered_track "all": how many files Live should write, when known.
+    expected_files: Optional[int] = None
+    # True when the typed range was widened to the sixteenth grid.
+    range_rounded: bool = False
 
     # Filled in by validate().
     directory: str = field(default="", init=False)
     stem: str = field(default="", init=False)
+    # "main", "all" or "track": which kind of Rendered Track choice this is.
+    track_mode: str = field(default=RENDERED_TRACK_MAIN, init=False)
+    track_name: str = field(default="", init=False)
+
+    @property
+    def typed_range(self) -> bool:
+        return self.start_beats is not None
 
     def validate(self) -> "ExportRequest":
+        self._validate_rendered_track()
+        self._validate_range()
+        return self._validate_file_options()
+
+    def _validate_rendered_track(self) -> None:
+        choice = str(self.rendered_track if self.rendered_track is not None else "").strip()
+        if not choice:
+            raise ValueError("rendered_track must be 'Main', 'all' or a track name (got '')")
+        lowered = choice.lower()
+        if lowered in tuple(n.lower() for n in MAIN_TRACK_VALUES):
+            self.track_mode, self.track_name = RENDERED_TRACK_MAIN, ""
+        elif lowered in (RENDERED_TRACK_ALL, ALL_TRACKS_ENTRY.lower()):
+            self.track_mode, self.track_name = RENDERED_TRACK_ALL, ""
+        else:
+            self.track_mode, self.track_name = "track", choice
+
+    def _validate_range(self) -> None:
+        if (self.start_beats is None) != (self.length_beats is None):
+            raise ValueError("start_beats and length_beats must be given together")
+        if self.start_beats is None:
+            return
+        numerator, denominator = self.signature
+        if int(numerator) < 1 or int(denominator) not in (1, 2, 4, 8, 16):
+            raise ValueError(f"unsupported time signature {numerator}/{denominator}")
+        try:
+            start, length = float(self.start_beats), float(self.length_beats)
+        except (TypeError, ValueError):
+            raise ValueError("start_beats and length_beats must be numbers")
+        if start < 0:
+            raise ValueError(f"start_beats must be >= 0 (got {start:g})")
+        if length <= 0:
+            raise ValueError(f"length_beats must be > 0 (got {length:g})")
+        for name, value in (("start_beats", start), ("length_beats", length)):
+            if abs(value * SIXTEENTHS_PER_BEAT - round(value * SIXTEENTHS_PER_BEAT)) > 1e-6:
+                raise ValueError(
+                    f"{name} {value:g} is not a whole number of sixteenth notes; Render Start "
+                    "and Render Length can only be typed to a sixteenth (a multiple of 0.25 beats)"
+                )
+        self.start_beats, self.length_beats = start, length
+
+    def _validate_file_options(self) -> "ExportRequest":
         fmt = str(self.format or "").strip().lower().lstrip(".")
         if fmt == "aif":
             fmt = "aiff"
@@ -224,7 +335,10 @@ class ExportRequest:
 
     @property
     def expected_paths(self) -> List[str]:
-        return [os.path.join(self.directory, self.stem + ext) for ext in FORMAT_EXTENSIONS[self.format]]
+        # Live adds the track's name to the name given in the Save panel when
+        # one track is rendered ("<name> <track>.wav"); the Main mix keeps it.
+        stem = f"{self.stem} {self.track_name}" if self.track_mode == "track" else self.stem
+        return [os.path.join(self.directory, stem + ext) for ext in FORMAT_EXTENSIONS[self.format]]
 
     @property
     def output_file(self) -> str:
@@ -249,17 +363,32 @@ def check_preconditions(request: ExportRequest, platform: Optional[str] = None) 
         )
 
 
+def _rendered_track_step(request: ExportRequest) -> Dict[str, Any]:
+    """The Rendered Track chooser step for this request.
+
+    The chooser's list is positioned so the current choice sits over the
+    control, so its rows move with the current choice and are never picked by
+    position except Live's own bus, which always leads the list. Everything
+    else is picked by name from the menu's items.
+    """
+    if request.track_mode == RENDERED_TRACK_ALL:
+        return {"op": "set_choice", "label": RENDERED_TRACK, "values": [ALL_TRACKS_ENTRY]}
+    if request.track_mode == "track":
+        return {"op": "set_choice", "label": RENDERED_TRACK, "values": [request.track_name]}
+    # Live's own bus leads this list and the tracks after it can have its
+    # name, so it is taken by position: the first entry, whatever is set.
+    return {"op": "set_choice", "label": RENDERED_TRACK, "values": list(MAIN_TRACK_VALUES),
+            "first": True}
+
+
 def build_dialog_plan(request: ExportRequest) -> List[Dict[str, Any]]:
     """Map export parameters to the Export dialog controls to set, in order.
 
     Order matters: File Type and Bit Depth are only live while Encode PCM is on.
+    The Render Start / Render Length fields are typed after these steps (see
+    ``LiveExporter._type_range``), once nothing else can change them.
     """
-    plan: List[Dict[str, Any]] = [
-        # Live's own bus leads this list and the tracks after it can have its
-        # name, so it is taken by position: the first entry, whatever is set.
-        {"op": "set_choice", "label": RENDERED_TRACK, "values": list(MAIN_TRACK_VALUES),
-         "first": True},
-    ]
+    plan: List[Dict[str, Any]] = [_rendered_track_step(request)]
     if request.format in PCM_FORMATS:
         plan += [
             {"op": "set_toggle", "label": ENCODE_PCM, "on": True},
@@ -370,6 +499,54 @@ function findControlShallow(w, label, roles) {
     }
   }
   throw new Error("control '" + label + "' not found in '" + safe(function () { return w.name(); }, '') + "'");
+}
+// Render Start and Render Length are each three AXSliders (bars, beats,
+// sixteenths) described "Start of Rendered Audio File (Bar)", "(Beat)" and
+// "(Sixteenths)", or "Length of Rendered Audio File (...)". Live ignores
+// AXValue writes and clicks on them, and Return in the dialog presses Export,
+// so a value is reached with the sliders' own AXIncrement / AXDecrement
+// actions (one step each) and read back after every step.
+var TIME_FIELDS = {
+  'renderstart': 'Start of Rendered Audio File',
+  'renderlength': 'Length of Rendered Audio File'
+};
+var TIME_UNITS = ['Bar', 'Beat', 'Sixteenths'];
+var MAX_NUDGES = 4000;
+function firstInt(v) {
+  var m = /-?\d+/.exec(String(v === undefined || v === null ? '' : v));
+  return m ? parseInt(m[0], 10) : null;
+}
+function timeFieldParts(w, label) {
+  var prefix = TIME_FIELDS[norm(label)];
+  if (!prefix) throw new Error("'" + label + "' is not a time field (Render Start or Render Length)");
+  var all = w.entireContents(), parts = [null, null, null];
+  for (var i = 0; i < all.length; i++) {
+    if (safe(function () { return all[i].role(); }, '') !== 'AXSlider') continue;
+    var d = safe(function () { return all[i].description(); }, '');
+    for (var u = 0; u < 3; u++)
+      if (d === prefix + ' (' + TIME_UNITS[u] + ')') parts[u] = all[i];
+  }
+  for (var u = 0; u < 3; u++)
+    if (!parts[u]) throw new Error("the three parts of '" + label + "' were not found in '" +
+      safe(function () { return w.name(); }, '') + "'");
+  return parts;
+}
+function readParts(parts) {
+  return parts.map(function (el) { return firstInt(safe(function () { return el.value(); }, null)); });
+}
+// Step one slider to a value. Beats and sixteenths wrap round, bars stop at
+// their ends, so a step that changes nothing means the value cannot be reached.
+function nudgeTo(el, target, what) {
+  var current = firstInt(safe(function () { return el.value(); }, null));
+  for (var n = 0; current !== target && n < MAX_NUDGES; n++) {
+    var action = (current === null || target > current) ? 'AXIncrement' : 'AXDecrement';
+    el.actions.byName(action).perform();
+    var next = firstInt(safe(function () { return el.value(); }, null));
+    if (next === current)
+      throw new Error(what + ' stays at ' + current + ' and cannot be set to ' + target);
+    current = next;
+  }
+  if (current !== target) throw new Error(what + ' did not reach ' + target + ' in ' + MAX_NUDGES + ' steps');
 }
 function press(el) {
   try { el.actions.byName('AXPress').perform(); } catch (e) { SE.click(el); }
@@ -548,6 +725,21 @@ function dispatch(cmd) {
       return {};
     case 'controls':
       return {controls: controlList(findWindow(p, cmd.window))};
+    case 'get_time_field': {
+      var w = findWindow(p, cmd.window);
+      return {fields: readParts(timeFieldParts(w, cmd.label))};
+    }
+    case 'set_time_field': {
+      var w = findWindow(p, cmd.window);
+      var parts = timeFieldParts(w, cmd.label);
+      if (cmd.fields.length !== 3) return {ok: false, error: 'a time field needs three parts'};
+      var before = readParts(parts);
+      for (var pass = 0; pass < 2; pass++)
+        for (var i = 0; i < 3; i++)
+          if ((cmd.fields[i] > 0) === (pass === 0))
+            nudgeTo(parts[i], cmd.fields[i], cmd.label + ' ' + TIME_UNITS[i].toLowerCase());
+      return {before: before, after: readParts(parts)};
+    }
     case 'texts': {
       // Every window with this name: a name does not single one out, and
       // Live's untitled windows all share the name ''.
@@ -891,6 +1083,9 @@ class LiveExporter:
         # The transport as the UI guard found it, set by preflight; run()
         # checks the transport against it when the export is over.
         self.transport_before: Optional[Dict[str, Optional[bool]]] = None
+        # Whether the Arrangement had a time selection when preflight looked
+        # (True, False, or None when accessibility could not tell).
+        self.selection_before: Optional[bool] = None
         self.clock = clock or _Clock()
         self.afinfo = afinfo or _run_afinfo
         self.audio_device = audio_device or read_live_audio_output_device
@@ -902,10 +1097,10 @@ class LiveExporter:
     def _call(self, op: str, **params: Any) -> Dict[str, Any]:
         result = self.driver.call(op, **params)
         entry = dict(params, op=op)
-        for key in ("before", "after", "clicked", "pressed", "where", "replaced"):
+        for key in ("before", "after", "clicked", "pressed", "where", "replaced", "fields"):
             if key in result:
                 entry[key] = result[key]
-        if op not in ("status", "texts", "controls"):
+        if op not in ("status", "texts", "controls", "get_time_field"):
             self.steps.append(entry)
         return result
 
@@ -997,6 +1192,7 @@ class LiveExporter:
                 "Live's UI is not safe to drive: " + "; ".join(e.reasons) + ". Nothing was clicked"
             ) from e
         self.transport_before = live_ui_state.transport_snapshot(state)
+        self.selection_before = (state.get("time_selection") or {}).get("present")
         armed = state.get("armed_tracks") or []
         if armed:
             names = ", ".join(str(t.get("name")) for t in armed)
@@ -1004,13 +1200,18 @@ class LiveExporter:
         return []
 
     def finalize(self, result: Dict[str, Any]) -> None:
-        """Leave Live as the export found it: no time selection, same transport.
+        """Leave Live as the export found it: same transport, no selection made.
 
-        Clears the selection Select Loop made and checks the transport
-        against what preflight saw, stopping playback a click started. The
-        outcome goes in the result (selection_cleared, transport_unchanged)
-        and a failure to clean up is a warning: the render itself is judged
-        by its file.
+        Nothing is clicked unless something needs undoing: the transport and
+        the time selection are read first (the export itself makes no
+        selection). A selection that is there, whoever made it, is cleared
+        (``live_ui_state.finish_ui_tool``), and playback a click started is
+        stopped. The outcome goes in
+        the result (selection_cleared, transport_unchanged, and
+        time_selection_before / time_selection_after) and a failure to clean
+        up is a warning: the render itself is judged by its file.
+
+        While the export is pending nothing is touched at all.
         """
         if self.transport_before is None:
             return
@@ -1021,8 +1222,28 @@ class LiveExporter:
                 "Live was not left clean: Live's UI is not safe to touch while the export is pending"
             )
             return
+        result["time_selection_before"] = self.selection_before
+        try:
+            after = live_ui_state.read_ui_state(self.driver, self.armed_reader)
+            selection = (after.get("time_selection") or {}).get("present")
+            changes = live_ui_state.compare_transport(
+                self.transport_before, live_ui_state.transport_snapshot(after)
+            )
+        except Exception as e:
+            result["selection_cleared"] = False
+            result["transport_unchanged"] = None
+            result.setdefault("warnings", []).append(
+                f"Live was not left clean: could not read Live's UI after the export: {e}"
+            )
+            return
+        if selection is False and not changes:
+            result["time_selection_after"] = False
+            result["selection_cleared"] = True
+            result["transport_unchanged"] = True
+            return
         outcome = live_ui_state.finish_ui_tool(self.driver, self.transport_before, self.armed_reader)
         result["selection_cleared"] = outcome.get("selection_cleared")
+        result["time_selection_after"] = False if outcome.get("selection_cleared") else None
         result["transport_unchanged"] = outcome.get("transport_unchanged")
         if outcome.get("stopped_playback"):
             result.setdefault("warnings", []).append(
@@ -1131,6 +1352,8 @@ class LiveExporter:
                 "expected_seconds": request.expected_seconds,
                 "rendered_seconds": None,
                 "length_verified": False,
+                "rendered_track": _rendered_track_label(request),
+                "files": [],
             })
             self._export(request, result)
         except (ExportError, ValueError) as e:
@@ -1150,17 +1373,6 @@ class LiveExporter:
         if not activated.get("frontmost"):
             raise ExportError("Ableton Live did not come to the front; export needs Live frontmost")
 
-        if request.select_loop:
-            # Select Loop acts on the view that has keyboard focus.
-            self._require(
-                self._call("menu", path=[NAVIGATE_MENU, ARRANGEMENT_VIEW_MENU_ITEM]),
-                "could not give the Arrangement keyboard focus",
-            )
-            self._require(
-                self._call("menu", path=[EDIT_MENU, SELECT_LOOP_MENU_ITEM]),
-                "could not select the loop for the render range",
-            )
-
         baseline = _window_names(self._status())
         untitled_shown = self._texts("") if "" in baseline else []
         try:
@@ -1172,7 +1384,7 @@ class LiveExporter:
                 self._call("keystroke", **EXPORT_SHORTCUT)
             elif not opened.get("ok"):
                 raise ExportError(f"could not open the Export dialog: {opened.get('error')}")
-            path, start_wall = self._drive_export(request, baseline, untitled_shown, result)
+            files, start_wall = self._drive_export(request, baseline, untitled_shown, result)
         except Exception as e:
             try:
                 still_open = self._settle(baseline, request.dialog_timeout)
@@ -1190,7 +1402,7 @@ class LiveExporter:
                 "and cancel it or let the render finish before changing the Set or "
                 "exporting again"
             ) from e
-        self._check_output(request, path, start_wall, result)
+        self._check_output(request, files, start_wall, result)
 
     def _drive_export(
         self,
@@ -1198,11 +1410,12 @@ class LiveExporter:
         baseline: Sequence[str],
         untitled_shown: Sequence[str],
         result: Dict[str, Any],
-    ) -> Tuple[str, float]:
+    ) -> Tuple[List[str], float]:
         """Drive the Export dialog and Save panel, then wait out the render.
 
-        Returns the rendered file and when the render started. Returns only
-        once Live shows no window the export opened.
+        Returns the rendered files and when the render started. Returns only
+        once Live shows no window the export opened and the files have
+        stopped growing.
         """
         if not self._wait_for_window(EXPORT_DIALOG_TITLE, request.dialog_timeout):
             raise ExportError(
@@ -1211,6 +1424,10 @@ class LiveExporter:
             )
         for step in build_dialog_plan(request):
             self._apply(step)
+        if request.typed_range:
+            self._type_range(request, result)
+        else:
+            self._report_prefilled_range(request, result)
         settings = self._call("controls", window=EXPORT_DIALOG_TITLE).get("controls", [])
         result["dialog_settings"] = {
             c["label"]: c["value"] for c in settings
@@ -1241,21 +1458,95 @@ class LiveExporter:
             ),
             "could not fill in the Save panel",
         )
-        path = self._wait_for_render(request, baseline, untitled_shown, start_wall, result)
-        return path, start_wall
+        files = self._wait_for_render(request, baseline, untitled_shown, start_wall, result)
+        return files, start_wall
+
+    def _read_field(self, label: str) -> Tuple[int, int, int]:
+        """The bar, beat and sixteenth a Render Start / Render Length field shows."""
+        res = self._require(
+            self._call("get_time_field", window=EXPORT_DIALOG_TITLE, label=label),
+            f"could not read '{label}'",
+        )
+        fields = res.get("fields")
+        if not isinstance(fields, (list, tuple)) or len(fields) != 3:
+            raise ExportError(f"could not read '{label}': Live's dialog gave {fields!r}")
+        try:
+            return tuple(int(v) for v in fields)  # type: ignore[return-value]
+        except (TypeError, ValueError):
+            raise ExportError(f"could not read '{label}': Live's dialog gave {fields!r}")
+
+    def _dialog_range(self, request: ExportRequest, start: Sequence[int], length: Sequence[int]) -> Dict[str, Any]:
+        return {
+            "start": format_fields(start),
+            "length": format_fields(length),
+            "start_beats": fields_to_beats(start, request.signature, True),
+            "length_beats": fields_to_beats(length, request.signature, False),
+        }
+
+    def _type_range(self, request: ExportRequest, result: Dict[str, Any]) -> None:
+        """Type Render Start and Render Length, then read both back.
+
+        Both are read only after both were typed, because Live may adjust
+        one when the other changes. A field that does not read what was typed
+        fails the export here, before Export is pressed.
+        """
+        wanted = {
+            RENDER_START: beats_to_fields(request.start_beats, request.signature, True),
+            RENDER_LENGTH: beats_to_fields(request.length_beats, request.signature, False),
+        }
+        for label, fields in wanted.items():
+            self._require(
+                self._call("set_time_field", window=EXPORT_DIALOG_TITLE, label=label,
+                           fields=list(fields)),
+                f"could not type '{label}'",
+            )
+        got = {label: self._read_field(label) for label in wanted}
+        for label, fields in wanted.items():
+            if got[label] != fields:
+                raise ExportError(
+                    f"'{label}' reads {format_fields(got[label])} after typing "
+                    f"{format_fields(fields)}; the range in the dialog is not the one asked for"
+                )
+        result["dialog_range"] = self._dialog_range(request, got[RENDER_START], got[RENDER_LENGTH])
+
+    def _report_prefilled_range(self, request: ExportRequest, result: Dict[str, Any]) -> None:
+        """With no range asked for, report what the dialog pre-filled (best effort)."""
+        try:
+            start, length = self._read_field(RENDER_START), self._read_field(RENDER_LENGTH)
+        except ExportError as e:
+            result["warnings"].append(f"the dialog's own render range was not read: {e}")
+            return
+        result["dialog_range"] = self._dialog_range(request, start, length)
 
     def _check_output(
-        self, request: ExportRequest, path: str, start_wall: float, result: Dict[str, Any]
+        self, request: ExportRequest, files: Sequence[str], start_wall: float, result: Dict[str, Any]
     ) -> None:
-        """Check the rendered file (and video); Live has finished with it by now."""
-        result["output_path"] = path
-        result["output_files"] = [path]
-        self._verify_audio(request, path, result)
+        """Check the rendered files (and video); Live has finished with them by now."""
+        files = list(files)
+        result["output_path"] = files[0]
+        result["output_files"] = list(files)
+        entries = [self._verify_audio(request, path, result, qualify=len(files) > 1)
+                   for path in files]
+        result["files"] = [e["entry"] for e in entries]
+        first = entries[0]["entry"]
+        result["file_info"] = entries[0]["info"]
+        result["rendered_seconds"] = first.get("duration_seconds")
+        result["length_verified"] = all(e["entry"].get("length_verified") for e in entries)
+        problems = [e["problem"] for e in entries if e["problem"]]
+        if problems:
+            raise ExportError("; ".join(problems))
+        if request.track_mode == RENDERED_TRACK_ALL and request.expected_files is not None \
+                and len(files) != request.expected_files:
+            raise ExportError(
+                f"All Individual Tracks wrote {len(files)} file(s) in {request.directory} "
+                f"but {request.expected_files} were expected: " + ", ".join(
+                    os.path.basename(f) for f in files)
+            )
         if request.create_video:
             videos = self._find_videos(request, start_wall)
             if not videos:
                 raise ExportError(
-                    f"audio was rendered to {path} but no new video file appeared in {request.directory}"
+                    f"audio was rendered to {files[0]} but no new video file appeared in {request.directory}"
                 )
             result["video_files"] = videos
             result["output_files"] += videos
@@ -1297,6 +1588,33 @@ class LiveExporter:
                     f"could not set '{label}' to {wanted[0]}: it reads '{after}'{hint}"
                 )
 
+    def _output_files(self, request: ExportRequest, start_wall: float) -> List[str]:
+        """The files this export has written so far (new since the Save panel)."""
+        if request.track_mode != RENDERED_TRACK_ALL:
+            for candidate in request.expected_paths:
+                try:
+                    st = os.stat(candidate)
+                except OSError:
+                    continue
+                if st.st_mtime >= start_wall - 1:
+                    return [candidate]
+            return []
+        # All Individual Tracks writes one file per track beside the name
+        # given in the Save panel: every new audio file whose name starts with it.
+        wanted = FORMAT_EXTENSIONS[request.format]
+        found = []
+        for name in sorted(os.listdir(request.directory)):
+            stem, ext = os.path.splitext(name)
+            if (stem != request.stem and not stem.startswith(request.stem + " ")) or ext.lower() not in wanted:
+                continue
+            full = os.path.join(request.directory, name)
+            try:
+                if os.stat(full).st_mtime >= start_wall - 1:
+                    found.append(full)
+            except OSError:
+                continue
+        return found
+
     def _wait_for_render(
         self,
         request: ExportRequest,
@@ -1304,11 +1622,18 @@ class LiveExporter:
         untitled_shown: Sequence[str],
         start_wall: float,
         result: Dict[str, Any],
-    ) -> str:
+    ) -> List[str]:
+        """Wait until the render is over: no export window open and no file growing.
+
+        Returns only when Live shows no window beyond the baseline (the render
+        progress window has closed) and the set of output files and every
+        file's size have stayed the same for STABLE_POLLS - 1 polls in a row.
+        Nothing is touched while waiting.
+        """
         deadline = self.clock.monotonic() + request.render_timeout
-        last_size: Optional[int] = None
+        last_signature: Optional[Tuple[Tuple[str, int], ...]] = None
         stable = 0
-        found: Optional[str] = None
+        found: List[str] = []
         while True:
             status = self._status()
             if not status.get("running"):
@@ -1320,19 +1645,12 @@ class LiveExporter:
                     result["dialog_text"] = {name: texts}
                     raise ExportError("Live reported an error during export: " + " | ".join(texts))
 
-            found = None
-            for candidate in request.expected_paths:
-                try:
-                    st = os.stat(candidate)
-                except OSError:
-                    continue
-                if st.st_mtime >= start_wall - 1:
-                    found = candidate
-                    break
+            found = self._output_files(request, start_wall)
+            signature = tuple((f, _size(f)) for f in found)
             if found:
-                size = os.path.getsize(found)
-                stable = stable + 1 if size and size == last_size else 0
-                last_size = size
+                grown = signature != last_signature or any(size == 0 for _, size in signature)
+                stable = 0 if grown else stable + 1
+                last_signature = signature
                 if not extra and stable >= STABLE_POLLS - 1:
                     return found
             if self.clock.monotonic() >= deadline:
@@ -1340,9 +1658,10 @@ class LiveExporter:
                 if texts:
                     result["dialog_text"] = texts
                 if found:
+                    sizes = ", ".join(f"{os.path.basename(f)} is {n} bytes" for f, n in signature)
                     raise ExportError(
                         f"render did not finish within {request.render_timeout:.0f}s "
-                        f"({found} is {last_size} bytes and Live still shows: {', '.join(extra) or 'nothing'})"
+                        f"({sizes} and Live still shows: {', '.join(extra) or 'nothing'})"
                     )
                 raise ExportError(
                     f"no output file was produced within {request.render_timeout:.0f}s "
@@ -1350,21 +1669,38 @@ class LiveExporter:
                 )
             self.clock.sleep(self.poll_interval)
 
-    def _verify_audio(self, request: ExportRequest, path: str, result: Dict[str, Any]) -> None:
-        if os.path.getsize(path) == 0:
+    def _verify_audio(
+        self, request: ExportRequest, path: str, result: Dict[str, Any], qualify: bool = False
+    ) -> Dict[str, Any]:
+        """Check one rendered file; returns {entry, info, problem}.
+
+        ``entry`` is the file's row in the reply (path, size, duration, sample
+        rate, ...). ``problem`` is a sentence when the file does not match the
+        request, or None. Warnings about what afinfo did not report go to
+        ``result``, naming the file when there are several (``qualify``).
+        """
+        prefix = f"{os.path.basename(path)}: " if qualify else ""
+        size = os.path.getsize(path)
+        entry: Dict[str, Any] = {"path": path, "size_bytes": size, "duration_seconds": None,
+                                 "sample_rate": None, "length_verified": False}
+        if size == 0:
             raise ExportError(f"output file is empty: {path}")
         text = self.afinfo(path)
         if not text:
-            result["warnings"].append("afinfo unavailable; the output file was not verified")
-            return
+            result["warnings"].append(
+                f"{prefix}afinfo unavailable; the output file was not verified")
+            return {"entry": entry, "info": None, "problem": None}
         info = _parse_afinfo(text)
-        result["file_info"] = info
         if not info:
-            result["warnings"].append("could not read afinfo output; the output file was not verified")
-            return
+            result["warnings"].append(
+                f"{prefix}could not read afinfo output; the output file was not verified")
+            return {"entry": entry, "info": info, "problem": None}
         problems = []
         unverified = []
         rate = info.get("sample_rate")
+        entry["sample_rate"] = rate
+        entry["bit_depth"] = info.get("bit_depth")
+        entry["channels"] = info.get("channels")
         if rate is None:
             unverified.append("sample rate")
         elif rate != request.sample_rate:
@@ -1376,7 +1712,7 @@ class LiveExporter:
             elif depth != request.bit_depth:
                 problems.append(f"bit depth is {depth}, expected {request.bit_depth}")
         duration = info.get("duration_seconds")
-        result["rendered_seconds"] = duration
+        entry["duration_seconds"] = duration
         if request.expected_seconds is not None:
             if duration is None:
                 unverified.append("length")
@@ -1387,13 +1723,14 @@ class LiveExporter:
                     "tempo changes inside it)"
                 )
             else:
-                result["length_verified"] = True
+                entry["length_verified"] = True
         if unverified:
             result["warnings"].append(
-                "afinfo did not report the " + ", ".join(unverified) + "; not verified"
+                f"{prefix}afinfo did not report the " + ", ".join(unverified) + "; not verified"
             )
-        if problems:
-            raise ExportError(f"{path} was written but does not match the request: " + "; ".join(problems))
+        problem = f"{path} was written but does not match the request: " + "; ".join(problems) \
+            if problems else None
+        return {"entry": entry, "info": info, "problem": problem}
 
     def _find_videos(self, request: ExportRequest, start_wall: float) -> List[str]:
         videos = []
@@ -1404,6 +1741,21 @@ class LiveExporter:
             if os.path.getmtime(full) >= start_wall - 1 and os.path.getsize(full) > 0:
                 videos.append(full)
         return videos
+
+
+def _size(path: str) -> int:
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def _rendered_track_label(request: ExportRequest) -> str:
+    if request.track_mode == RENDERED_TRACK_ALL:
+        return RENDERED_TRACK_ALL
+    if request.track_mode == "track":
+        return request.track_name
+    return "Main"
 
 
 def _same(a: Any, b: Any) -> bool:
