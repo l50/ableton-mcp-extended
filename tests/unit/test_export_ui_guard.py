@@ -181,13 +181,24 @@ def test_export_leaves_no_selection_failure_path(clock, tmp_path):
     assert result["selection_cleared"] is True and result["transport_unchanged"] is True
 
 
-def test_export_leaves_no_selection_pending_path_reports_it_could_not_clean_up(clock, tmp_path):
-    live, exporter = make(clock, save_panel_times_out=True, uncancellable=(le.SAVE_PANEL_TITLE,))
+@pytest.mark.parametrize(
+    "behaviour",
+    [
+        {"save_panel_times_out": True, "uncancellable": (le.SAVE_PANEL_TITLE,)},
+        {"window_stays": True},
+    ],
+    ids=["save_panel_still_open", "render_progress_still_open"],
+)
+def test_export_leaves_no_selection_pending_path_reports_it_could_not_clean_up(
+    behaviour, clock, tmp_path
+):
+    live, exporter = make(clock, **behaviour)
     result = exporter.run(request(tmp_path, select_loop=True))
     assert result["export_pending"] is True
-    # Live still shows the Save panel, so nothing may be clicked: the selection stays
     assert live.time_selection is True
     assert result["selection_cleared"] is False
+    assert result["transport_unchanged"] is None
+    assert [m["path"] for m in live.driven("menu") if m["path"][0] == "Playback"] == []
     assert any("Live was not left clean" in w and "not safe to touch" in w for w in result["warnings"])
 
 

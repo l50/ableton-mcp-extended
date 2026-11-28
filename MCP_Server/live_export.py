@@ -1011,6 +1011,13 @@ class LiveExporter:
         """
         if self.transport_before is None:
             return
+        if result.get("export_pending"):
+            result["selection_cleared"] = False
+            result["transport_unchanged"] = None
+            result.setdefault("warnings", []).append(
+                "Live was not left clean: Live's UI is not safe to touch while the export is pending"
+            )
+            return
         outcome = live_ui_state.finish_ui_tool(self.driver, self.transport_before, self.armed_reader)
         result["selection_cleared"] = outcome.get("selection_cleared")
         result["transport_unchanged"] = outcome.get("transport_unchanged")

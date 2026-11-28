@@ -57,10 +57,20 @@ def test_registered_tools_exist_with_their_documented_parameters():
         assert module in tools.TOOL_MODULES
 
 
-def test_registered_tool_docstrings_say_what_they_return_and_refuse():
-    for fn in (tools.ui_state.get_ui_state, tools.ui_state.clear_selection,
-               tools.save.save_set, tools.save.save_set_as):
-        assert "Returns JSON" in fn.__doc__
+def test_registered_tools_return_json_and_refuse_unsafe_state(monkeypatch, tmp_path):
+    unsafe = FakeUI(key_map=True)
+    monkeypatch.setattr(live_ui_state, "_default_driver", lambda: unsafe)
+    with patch.object(connection, "get_ableton_connection", return_value=FakeAbleton()):
+        state = json.loads(tools.ui_state.get_ui_state(CTX))
+        cleared = json.loads(tools.ui_state.clear_selection(CTX))
+        saved = json.loads(tools.save.save_set(CTX))
+        saved_as = json.loads(
+            tools.save.save_set_as(CTX, str(tmp_path / "Out.als"), overwrite=False)
+        )
+    assert state["ok"] is True and state["safe_to_drive"] is False
+    for refused in (cleared, saved, saved_as):
+        assert refused["ok"] is False and refused["unsafe_reasons"]
+    assert unsafe.clicks() == []
 
 
 def test_get_ui_state_returns_the_state_with_armed_tracks_one_based(live):

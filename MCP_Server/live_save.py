@@ -257,6 +257,12 @@ def save_set_as(
     except live_ui_state.UnsafeUIState as e:
         return _refuse(e)
     result: dict[str, Any] = {"ok": False, "saved": False, "path": target}
+    candidates = [target, _project_path(target)]
+    before_mtime_ns = {
+        candidate: stat.st_mtime_ns
+        for candidate in candidates
+        if (stat := _stat(candidate)) is not None
+    }
     started = time.time()
     clicked = driver.call("menu", path=[FILE_MENU, SAVE_AS_MENU_ITEM])
     if not clicked.get("ok", False):
@@ -282,13 +288,19 @@ def save_set_as(
         )
         if not filled.get("ok", False):
             raise SaveError(f"could not fill in the Save panel: {filled.get('error') or 'failed'}")
-        candidates = [target, _project_path(target)]
         found: list[str] = []
 
         def written() -> bool:
             for candidate in candidates:
                 stat = _stat(candidate)
-                if stat is not None and stat.st_size > 0 and stat.st_mtime >= started - 1:
+                if stat is None or stat.st_size <= 0:
+                    continue
+                before_ns = before_mtime_ns.get(candidate)
+                if (
+                    stat.st_mtime_ns > before_ns
+                    if before_ns is not None
+                    else stat.st_mtime >= started - 1
+                ):
                     found.append(candidate)
                     return True
             return False

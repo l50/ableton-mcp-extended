@@ -5,16 +5,25 @@ modification time the fake bumps the way Live's save does, so the checks that
 read the path and the time after the save run for real.
 """
 
-import ast
+import json
 import os
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+if "MCP_Server.server" not in sys.modules and "mcp" not in sys.modules:
+    _mock_fastmcp = MagicMock()
+    _mock_fastmcp.FastMCP.return_value.tool.return_value = lambda fn: fn
+    sys.modules["mcp"] = MagicMock()
+    sys.modules["mcp.server"] = MagicMock()
+    sys.modules["mcp.server.fastmcp"] = _mock_fastmcp
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from MCP_Server import live_save as ls  # noqa: E402
+from MCP_Server import connection, live_export, live_save as ls, live_ui_state, tools  # noqa: E402
+from tests.unit.test_live_export import WAV_24, FakeClock, afinfo_for, make  # noqa: E402
 from tests.unit.ui_fakes import FakeUI, raw_window  # noqa: E402
 
 
@@ -271,6 +280,16 @@ def test_save_as_overwrite_true_passes_replace_to_the_panel(als, clock):
     assert [c for c in live.calls if c["op"] == "save_panel"][0]["replace"] is True
 
 
+def test_save_as_overwrite_true_requires_mtime_to_advance_beyond_existing_file(tmp_path, clock):
+    fresh = tmp_path / "Fresh.als"
+    fresh.write_bytes(b"just written")
+    live = FakeUI()
+    live.op_save_panel = lambda **kw: {"ok": True}
+    result = ls.save_set_as(str(fresh), overwrite=True, driver=live, **timing(clock))
+    assert result["ok"] is False
+    assert "was written within 5s" in result["error"]
+
+
 def test_save_as_unwritable_folder_is_rejected(tmp_path, clock):
     folder = tmp_path / "ro"
     folder.mkdir()
@@ -354,32 +373,64 @@ def test_save_as_unexpected_driver_error_is_a_failure_and_cancels(tmp_path, cloc
 
 # ── never called implicitly ──────────────────────────────────────
 
-MCP_SERVER = Path(__file__).resolve().parents[2] / "MCP_Server"
-ALLOWED = {MCP_SERVER / "live_save.py", MCP_SERVER / "tools" / "save.py"}
 
+def test_never_called_by_other_ui_tools(tmp_path, monkeypatch):
+    ctx = MagicMock()
+    monkeypatch.setattr(sys, "platform", "darwin")
+    fake_ui = FakeUI(selection=True)
+    monkeypatch.setattr(live_ui_state, "_default_driver", lambda: fake_ui)
+    ableton = MagicMock()
+    ableton.send_command.side_effect = lambda cmd, params=None: (
+        {
+            "transport": {
+                "tempo": 120.0,
+                "loop_enabled": False,
+                "loop_start": 0.0,
+                "loop_length": 4.0,
+                "back_to_arranger": False,
+            },
+            "tracks": [{"index": 0, "arrangement_clips": [{"start_time": 0.0, "end_time": 6.0}]}],
+        }
+        if cmd == "get_arrangement_info"
+        else {"armed_tracks": []}
+    )
+    with patch.object(connection, "get_ableton_connection", return_value=ableton):
+        assert json.loads(tools.ui_state.get_ui_state(ctx))["ok"] is True
+        assert json.loads(tools.ui_state.clear_selection(ctx))["ok"] is True
 
-def test_never_called_by_another_module():
-    offenders = []
-    for path in sorted(MCP_SERVER.rglob("*.py")):
-        if path in ALLOWED:
-            continue
-        for node in ast.walk(ast.parse(path.read_text())):
-            names = set()
-            if isinstance(node, ast.ImportFrom):
-                names |= {a.name for a in node.names} | {node.module or ""}
-            elif isinstance(node, ast.Import):
-                names |= {a.name for a in node.names}
-            elif isinstance(node, ast.Name):
-                names.add(node.id)
-            elif isinstance(node, ast.Attribute):
-                names.add(node.attr)
-            if names & {"live_save", "save_set", "save_set_as", "MCP_Server.live_save"}:
-                offenders.append(f"{path.name}:{node.lineno}")
-    assert offenders == []
+        export_clock = FakeClock()
+        fake_live_audio, audio_exporter = make(export_clock, afinfo=afinfo_for(48000, WAV_24))
+        with patch.object(live_export, "LiveExporter", return_value=audio_exporter):
+            audio_out = json.loads(
+                tools.export.export_audio(
+                    ctx, output_path=str(tmp_path / "audio.wav"), sample_rate=48000
+                )
+            )
+        assert audio_out["ok"] is True
+
+        fake_live_video, video_exporter = make(export_clock, afinfo=afinfo_for(48000, WAV_24))
+        fake_live_video.controls[live_export.CREATE_VIDEO]["enabled"] = True
+        fake_live_video.extra_render_files = [(str(tmp_path / "video.mp4"), b"\0" * 32)]
+        with patch.object(live_export, "LiveExporter", return_value=video_exporter):
+            video_out = json.loads(
+                tools.export.export_video(
+                    ctx, output_path=str(tmp_path / "video.wav"), sample_rate=48000
+                )
+            )
+        assert video_out["ok"] is True
+
+    menu_clicks = [
+        c["path"]
+        for driver in (fake_ui, fake_live_audio, fake_live_video)
+        for c in driver.calls
+        if c["op"] == "menu"
+    ]
+    assert not any(
+        path[0] == ls.FILE_MENU and path[1] in (ls.SAVE_MENU_ITEM, ls.SAVE_AS_MENU_ITEM)
+        for path in menu_clicks
+    )
 
 
 def test_never_called_the_save_functions_are_only_reachable_through_the_save_tool_module():
-    from MCP_Server import tools
-
     assert tools.save.live_save is ls
     assert callable(tools.save.save_set) and callable(tools.save.save_set_as)
