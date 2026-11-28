@@ -74,7 +74,7 @@ This project provides comprehensive, programmatic control over the Ableton Live 
     * Import audio files directly into audio tracks or clip slots.
 
 * **Exporting Audio and Video (macOS):**
-    * Render the Main output to WAV, AIFF, FLAC or MP3 with `export_audio`, choosing sample rate, bit depth, normalize and the range (whole Arrangement, loop brace, or current selection).
+    * Render the Main output to WAV, AIFF, FLAC or MP3 with `export_audio`, choosing sample rate, bit depth, normalize, the rendered track (Main, one named track, or every track as its own file) and the range (whole Arrangement, loop brace, current selection, or a start and length you give in bars or beats).
     * Render the Arrangement's video along with the audio with `export_video`.
     * These drive Live's Export Audio/Video dialog through macOS UI scripting. See [Exporting audio and video](#exporting-audio-and-video-macos) for the requirements.
 
@@ -234,7 +234,7 @@ Key Map and MIDI Map mode, dialogs, keyboard focus and the Arrangement time sele
 
 `get_ui_state` reports and never refuses. Its `safe_to_drive` is false, with the reasons in `unsafe_reasons`, in Key Map or MIDI Map mode, with any dialog open (the Export dialog, the Save panel, "Save changes?", the crash-recovery prompt and Live's other prompts), while playing or recording, with Computer MIDI Keyboard on, or when something could not be read. A value accessibility cannot tell apart is `null`, never a guess: for example `time_selection.present` is `null` while a view other than the Arrangement has focus. After a crash Live shows a "Report a Crash" help panel in its Learn View; that is a view, not a dialog, so `get_ui_state` reports it as `crash_report_panel: true` without treating the UI as unsafe.
 
-`export_audio`, `export_video`, `clear_selection`, `save_set` and `save_set_as` all run this check first and refuse. After an export the Arrangement has no time selection (the tool moves the insert marker to the playhead with Playback > Move Insert Marker To Playhead) and the transport is as it was; the reply says so in `selection_cleared` and `transport_unchanged`, and a click that started playback is stopped. Clip and track selections are not cleared.
+`export_audio`, `export_video`, `clear_selection`, `save_set` and `save_set_as` all run this check first and refuse. The export tools never make a time selection or move the loop brace, so an export leaves the loop and the selection as it found them. After an export the Arrangement has no time selection (one that was already there is cleared with Playback > Move Insert Marker To Playhead) and the transport is as it was; the reply says so in `selection_cleared` and `transport_unchanged`, and a click that started playback is stopped. Clip and track selections are not cleared.
 
 `save_set` needs a Set that already has a file (use `save_set_as` for an untitled one), and Live only enables Save while the Set has unsaved changes. Live saves a never-saved Set into a `<name> Project` folder it creates, so `save_set_as` returns the real `path` and the `requested_path`.
 
@@ -242,7 +242,7 @@ Key Map and MIDI Map mode, dialogs, keyboard focus and the Arrangement time sele
 
 ## Exporting Audio and Video (macOS)
 
-Live's Remote Script API has no way to start an export, so `export_audio` and `export_video` work through Live's UI instead. They bring Live to the front, open **File > Export Audio/Video**, set the dialog, fill in the macOS Save panel, wait for the render, and then check the file before they report success.
+Live's Remote Script API has no way to start an export, so `export_audio` and `export_video` work through Live's UI instead. They bring Live to the front, open **File > Export Audio/Video**, set the dialog (the rendered track, then Render Start and Render Length typed into their fields and read back), fill in the macOS Save panel, wait for the render to finish, and then check the files before they report success.
 
 Requirements:
 
@@ -258,20 +258,25 @@ What gets set:
 | `format` | `wav`, `aiff`, `flac`, `mp3` (CBR 320) | `wav` |
 | `sample_rate` | 22050, 32000, 44100, 48000, 88200, 96000, 176400, 192000 | 44100 |
 | `bit_depth` | 16, 24, 32 (PCM only) | 24 |
-| `render_range` | `arrangement` (bar 1 to the end of the last clip), `loop` (the loop brace), `selection` (whatever Live pre-fills) | `arrangement` |
+| `render_range` | What to render when no start or length is given: `arrangement` (bar 1 to the end of the last clip), `loop` (the loop brace, read and never moved), `selection` (whatever Live pre-fills) | `arrangement` |
+| `start_bar` / `start_beat` | Where to start: a 1-based bar, or a beat (0 = the start of the song). `start_bar` wins. With a start or a length given, `render_range` is ignored and the reply says `render_range: "custom"`. A start left out is 0. | none |
+| `length_bars` / `length_beats` | How long to render, in bars or beats. `length_bars` wins. A length left out runs to the end of the Arrangement. | none |
+| `rendered_track` | `Main` (Live's own mix), `all` (All Individual Tracks, one file per track) or the name of one track | `Main` |
 | `normalize` | true / false | false |
 | `overwrite` | Replace an existing file | false |
 | `render_timeout` | Seconds to wait for the render to finish | 900 (`export_video`: 1800) |
 
-Rendered Track is always set to Main. `arrangement` moves the loop brace over the whole Arrangement to select it, and puts the brace back once Live is out of the export. `arrangement` and `loop` also switch Live to the Arrangement View, give it keyboard focus, and leave it there. Live keeps the dialog settings these tools choose for your next manual export. Options the tools don't expose (dither, Render as Loop, Convert to Mono, Create Analysis File, video encoder) are left as they are.
+The range is worked out from the Set (the transport and the clips) and typed into the dialog's Render Start and Render Length fields, which are read back before Export is pressed; a field that doesn't take its value fails the export before anything renders. Nothing selects the loop or the Arrangement, so no time selection is made and the loop brace never moves. The dialog counts in sixteenth notes, so a start or length you give has to be a whole number of sixteenths (a multiple of 0.25 beats) and is refused, not rounded, when it isn't. A range the tool reads from the Set (the end of the last clip, the loop brace) is widened to that grid, and `range_rounded` says so. Bars follow the Set's time signature. `dialog_range` in the reply shows what Live showed when Export was pressed.
+
+`rendered_track` is chosen by name from the dialog's list and read back. A track name has to match exactly one track; two tracks with one name are refused, and "Main", "Master" and "All Individual Tracks" always mean Live's own entries. With `all`, `output_path` gives the name the files start with and Live writes one file per track beside it; `output_files` and `files` list them all. Live keeps the dialog settings these tools choose for your next manual export. Options the tools don't expose (dither, Render as Loop, Convert to Mono, Create Analysis File, video encoder) are left as they are.
 
 Live renders what is playing, so `arrangement` and `loop` refuse to run while Session clips override the Arrangement (the Back to Arrangement button is lit). Click it first, or use `selection` to render what you hear.
 
 The reply is JSON. `ok` is true only when the output file exists and has stopped growing, and `afinfo` doesn't report a different sample rate or bit depth or, for `arrangement` and `loop`, a different length than the request. If `afinfo` can't be run or leaves one of those values out, `ok` stays true and `warnings` says what wasn't checked. A failure comes back as `ok: false` with the reason in `error`. That covers a dialog that never opened, a control that wouldn't change, an unwritable folder, an existing file, a render timeout, or an error message Live showed (quoted verbatim in `dialog_text`). The reply also lists every UI step it took.
 
-If the export fails once the Export dialog has been asked for (the Save panel timing out, say), the tools cancel the Save panel and the Export dialog, then wait until Live shows no window the export opened. Nothing in the Set moves while an export window or a render is still up, because changing the loop mid-render can leave Live's render stuck at 0%. When Live can't be shown to be clear, `export_pending` is true. The loop brace is left where the render needs it, `loop_to_restore` says where it was, and `error` says what to check in Live. Until Live is shown clear of that export, the next export call stops before touching the Set and says so.
+The tools return only after the render progress window has closed and every output file has stopped growing, so a reply with `ok: true` means the files are complete. If the export fails once the Export dialog has been asked for (the Save panel timing out, say), the tools cancel the Save panel and the Export dialog, then wait until Live shows no window the export opened. Nothing in the Set is changed or restored while an export window or a render is still up. When Live can't be shown to be clear, `export_pending` is true and `error` says what to check in Live. Until Live is shown clear of that export, the next export call stops before clicking anything and says so.
 
-The tools don't read Render Start and Render Length back from the dialog, so `render_range` in the reply is the range you asked for, and the file's length is the only check on it. `rendered_seconds` is the length `afinfo` reports. `expected_seconds` is the range's length in beats at the Set's current tempo, and `length_verified` is true when the two agree to within half a second. If they don't, the file stays where it was written and the reply is `ok: false`. That check assumes one tempo, so a Set whose tempo changes inside the range fails it even when the file is right. `selection` has no expected length and is never length-verified.
+`files` has one row per rendered file with its `path`, `duration_seconds`, `sample_rate`, `bit_depth`, `channels` and `size_bytes`. The file's length is checked against the range that was typed: `rendered_seconds` is the length `afinfo` reports for the first file, `expected_seconds` is the typed range's length in beats at the Set's current tempo, and `length_verified` is true when every file agrees with it to within half a second. If they don't, the file stays where it was written and the reply is `ok: false`. That check assumes one tempo, so a Set whose tempo changes inside the range fails it even when the file is right. `selection` has no expected length and is never length-verified.
 
 `export_video` needs video clips in the Arrangement, because Live only enables Create Video when there are some. The video is written next to the audio file using the encoder already chosen in the dialog.
 

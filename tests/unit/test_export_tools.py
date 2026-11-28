@@ -93,24 +93,22 @@ def with_transport(**changes):
     return dict(ARRANGEMENT, transport=dict(ARRANGEMENT["transport"], **changes))
 
 
-def test_arrangement_range_selects_whole_arrangement_and_restores_loop(run, tmp_path):
+def test_arrangement_range_is_computed_and_typed_without_touching_the_loop(run, tmp_path):
     out, fake, seen = run(tools.export.export_audio, output_path=str(tmp_path / "mix"), format="flac",
                           sample_rate=96000, bit_depth=16, normalize=True)
     assert out["ok"] is True
     assert out["render_range"] == "arrangement"
-    assert seen["calls_at_export"] == [
-        ("get_arrangement_info", {"track_index": -1}),
-        ("set_arrangement_loop", {"enabled": True, "start": 0.0, "length": 64.5}),
-        ("set_view", {"view_name": "Arranger"}),
-    ]
-    assert fake.calls[-1] == ("set_arrangement_loop", {"enabled": True, "start": 16.0, "length": 8.0})
+    # The set is only read: no loop move, no view change, nothing to restore.
+    assert fake.calls == [("get_arrangement_info", {"track_index": -1})]
+    assert seen["calls_at_export"] == fake.calls
     req = seen["request"]
     assert (req.format, req.sample_rate, req.bit_depth, req.normalize) == ("flac", 96000, 16, True)
-    assert req.select_loop is True
+    assert (req.start_beats, req.length_beats) == (0.0, 64.5)
     assert req.create_video is False
     assert req.output_file == str(tmp_path / "mix.flac")
     # 64.5 beats at 120 BPM: what the rendered file is checked against.
     assert req.expected_seconds == 32.25
+    assert out["range_rounded"] is False
 
 
 def test_defaults(run):
@@ -123,12 +121,9 @@ def test_defaults(run):
 def test_loop_range_reads_the_loop_and_leaves_the_brace_alone(run):
     out, fake, seen = run(tools.export.export_audio, render_range="Loop")
     assert out["ok"] is True and out["render_range"] == "loop"
-    assert fake.calls == [
-        ("get_arrangement_info", {"track_index": -1}),
-        ("set_view", {"view_name": "Arranger"}),
-    ]
-    assert seen["request"].select_loop is True
-    # The 8-beat loop brace at 120 BPM.
+    assert fake.calls == [("get_arrangement_info", {"track_index": -1})]
+    # The 8-beat loop brace at 16, typed into the dialog, at 120 BPM.
+    assert (seen["request"].start_beats, seen["request"].length_beats) == (16.0, 8.0)
     assert seen["request"].expected_seconds == 4.0
 
 
@@ -144,7 +139,7 @@ def test_selection_range_touches_nothing_over_the_lom(run):
     assert out["ok"] is True
     assert fake.calls == []
     req = seen["request"]
-    assert req.select_loop is False
+    assert req.typed_range is False
     assert (req.overwrite, req.render_timeout) == (True, 60.0)
     assert req.expected_seconds is None
 
@@ -214,13 +209,12 @@ def test_empty_arrangement(run):
     assert "request" not in seen
 
 
-def test_export_failure_result_passes_through_and_loop_is_restored(run):
+def test_export_failure_result_passes_through_and_no_loop_command_is_sent(run):
     failure = {"ok": False, "status": "failed", "error": "no output file was produced", "warnings": []}
     out, fake, seen = run(tools.export.export_audio, export_result=failure)
     assert out["ok"] is False
     assert out["error"] == "no output file was produced"
-    assert fake.calls[-1][0] == "set_arrangement_loop"
-    assert fake.calls[-1][1]["start"] == 16.0
+    assert [c for c, _ in fake.calls] == ["get_arrangement_info"]
 
 
 def test_exporter_exception_becomes_failure_json(run):
@@ -229,7 +223,7 @@ def test_exporter_exception_becomes_failure_json(run):
     assert out["status"] == "failed"
     assert "osascript died" in out["error"]
     assert out["output_files"] == []
-    assert fake.calls[-1][1] == {"enabled": True, "start": 16.0, "length": 8.0}
+    assert [c for c, _ in fake.calls] == ["get_arrangement_info"]
 
 
 def test_lom_failure_becomes_failure_json(run):
@@ -240,43 +234,21 @@ def test_lom_failure_becomes_failure_json(run):
     assert "request" not in seen
 
 
-def test_loop_restore_failure_is_a_warning(run):
-    fake = FakeAbleton({"get_arrangement_info": ARRANGEMENT},
-                       fail_on={("set_arrangement_loop", 4): RuntimeError("socket closed")})
-    out, fake, seen = run(tools.export.export_audio, fake=fake)
-    assert out["ok"] is True
-    assert out["warnings"] == ["could not restore the loop brace: socket closed"]
-
-
-def test_preflight_runs_before_the_loop_is_touched_and_the_exporter_is_reused(run):
+def test_the_exporter_is_built_with_the_armed_track_reader_and_reused(run):
     out, fake, seen = run(tools.export.export_audio)
     assert out["ok"] is True
-    assert seen["preflight_calls"] == 1
     assert seen["exporter"] is not None
 
 
-@pytest.mark.parametrize("render_range", ["arrangement", "loop", "selection"])
-def test_missing_audio_interface_stops_before_touching_the_set(run, render_range):
-    error = live_export.ExportError("Live has no audio output device (its log reports "
-                                    "'Output Device: No Device')")
-    out, fake, seen = run(tools.export.export_audio, render_range=render_range, preflight_error=error)
-    assert out["ok"] is False
-    assert "Live has no audio output device" in out["error"]
-    assert out["export_pending"] is False
-    assert fake.calls == [] and "request" not in seen
-
-
-def test_pending_export_leaves_the_loop_brace_where_the_render_needs_it(run):
+def test_pending_export_sends_nothing_to_the_set(run):
     pending = {"ok": False, "status": "failed", "warnings": [], "export_pending": True,
                "error": "UI scripting op 'save_panel' timed out after 45s. The export may still be pending"}
     out, fake, seen = run(tools.export.export_audio, export_result=pending)
-    assert out["ok"] is False
-    assert [p for c, p in fake.calls if c == "set_arrangement_loop"] == [
-        {"enabled": True, "start": 0.0, "length": 64.5}]
-    assert out["loop_to_restore"] == {"enabled": True, "start": 16.0, "length": 8.0}
-    assert out["error"].endswith(
-        "The loop brace was not restored because Live may still be exporting; once Live shows "
-        "no export window, set it back with set_arrangement_loop(enabled=True, start=16, length=8)")
+    assert out["ok"] is False and out["export_pending"] is True
+    # Only the read that worked the range out: nothing moved, so nothing to restore.
+    assert [c for c, _ in fake.calls] == ["get_arrangement_info"]
+    assert "loop_to_restore" not in out
+    assert "loop brace" not in out["error"]
 
 
 def test_arrangement_end_beats():
@@ -285,12 +257,15 @@ def test_arrangement_end_beats():
 
 
 
-# ── a save-dialog timeout must never move the loop under a pending export ──
+# ── nothing is moved or restored around a pending export ──
 
 
 from tests.unit.test_live_export import WAV_AFINFO, FakeClock, FakeLive  # noqa: E402
 
 SAVE_TIMEOUT = "UI scripting op 'save_panel' timed out after 45s"
+READ_ONLY = {"get_arrangement_info", "list_tracks", "get_recording_status"}
+UI_OPS = ("menu", "press", "set_choice", "set_toggle", "save_panel", "cancel", "set_time_field",
+          "keystroke")
 
 
 class WatchingAbleton(FakeAbleton):
@@ -341,35 +316,27 @@ def _timeout_run(tmp_path, monkeypatch, cancel_closes=True, **behaviour):
     return out, fake, live
 
 
-def test_save_dialog_timeout_never_restores_the_loop_while_an_export_window_is_open(
-        tmp_path, monkeypatch):
+def test_save_dialog_timeout_sends_nothing_that_changes_the_set(tmp_path, monkeypatch):
     out, fake, live = _timeout_run(tmp_path, monkeypatch)
     assert out["ok"] is False
     assert SAVE_TIMEOUT in out["error"]
-    restores = [names for cmd, names in fake.windows_at[2:] if cmd == "set_arrangement_loop"]
-    assert restores, "the loop was never restored after Live closed its export windows"
-    for names in restores:
-        assert live_export.SAVE_PANEL_TITLE not in names
-        assert live_export.EXPORT_DIALOG_TITLE not in names
-    assert fake.calls[-1] == ("set_arrangement_loop", {"enabled": True, "start": 16.0, "length": 8.0})
+    assert {c for c, _ in fake.calls} <= READ_ONLY
     assert out["export_pending"] is False
 
 
-def test_save_dialog_that_cannot_be_cancelled_leaves_the_loop_and_says_what_to_check(
+def test_save_dialog_that_cannot_be_cancelled_leaves_everything_and_says_what_to_check(
         tmp_path, monkeypatch):
     out, fake, live = _timeout_run(tmp_path, monkeypatch, cancel_closes=False)
     assert out["ok"] is False
     assert live_export.SAVE_PANEL_TITLE in live.names()
-    # Only the move that set the render range; no restore while the panel is up.
-    loop_moves = [p for c, p in fake.calls if c == "set_arrangement_loop"]
-    assert loop_moves == [{"enabled": True, "start": 0.0, "length": 64.5}]
+    assert {c for c, _ in fake.calls} <= READ_ONLY
     assert out["export_pending"] is True
     assert "may still be pending" in out["error"]
     assert "Save" in out["error"]
-    assert "loop brace was not restored" in out["error"]
+    assert "loop_to_restore" not in out
 
 
-def test_retry_while_a_pending_render_runs_never_moves_the_loop(tmp_path, monkeypatch):
+def test_retry_while_a_pending_render_runs_changes_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
     clock = FakeClock()
     live = FakeLive(clock, window_stays=True)
@@ -386,8 +353,11 @@ def test_retry_while_a_pending_render_runs_never_moves_the_loop(tmp_path, monkey
             out = json.loads(tools.export.export_audio(
                 CTX, output_path=str(tmp_path / "mix.wav"), render_timeout=6))
         assert out["export_pending"] is True
+        driven_before = len(live.driven(*UI_OPS))
         with patch.object(connection, "get_ableton_connection", return_value=retry):
             again = json.loads(tools.export.export_audio(CTX, output_path=str(tmp_path / "again.wav")))
     assert again["ok"] is False
     assert "an earlier export did not finish cleanly" in again["error"]
-    assert retry.calls == []
+    assert {c for c, _ in first.calls} <= READ_ONLY and {c for c, _ in retry.calls} <= READ_ONLY
+    # The retry clicked and typed nothing in Live.
+    assert len(live.driven(*UI_OPS)) == driven_before

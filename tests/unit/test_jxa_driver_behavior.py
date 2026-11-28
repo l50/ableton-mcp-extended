@@ -34,6 +34,9 @@ var WORLD = JSON.parse(process.argv[2]);
 var CLOCK = {now: 0, g: []};  // fake seconds; g: when each Cmd+Shift+G arrived
 var SHEET = WORLD.sheet || {};  // late: seconds before the sheet shows; ignore: shortcuts swallowed
 var ignored = 0;
+// Numeric fields take typed digits: pressing one starts an entry, digits
+// accumulate, Return commits the entry as the field's value.
+var TYPING = {field: null, buffer: ''};
 function delay(s) {
   CLOCK.now += s;
   if (FOCUS_READY_AT !== null && CLOCK.now >= FOCUS_READY_AT - 1e-9) {
@@ -132,6 +135,7 @@ var ACTIONS = {
     });
   },
   toggle: function (sw) { sw.spec.value = sw.spec.value === 'On' ? 'Off' : 'On'; },
+  focusField: function (field) { TYPING.field = field; TYPING.buffer = ''; },
   // A Cancel button closes its window, unless a sheet on it blocks it.
   closeWindow: function (btn) {
     windows = windows.filter(function (w) {
@@ -216,6 +220,11 @@ function Application(name) {
     keyCode: function (code) {
       if (!FRONT || !KEYBOARD_FOCUS) { LOG.stray.push(code); return; }
       LOG.keys.push(code);
+      if (code === 36 && TYPING.field) {
+        TYPING.field.spec.value = TYPING.buffer;
+        TYPING.field = null;
+        return;
+      }
       if (code === 36) { CLOCK.done = true; windows.forEach(function (w) { w.sheets = []; }); }  // Return: go
       if (code === 53) {  // Esc: close a sheet, else a window that Esc cancels, else a menu
         var sheeted = windows.filter(function (w) { return w.sheets.length; });
@@ -230,6 +239,7 @@ function Application(name) {
     keystroke: function (k, opts) {
       if (!FRONT || !KEYBOARD_FOCUS) { LOG.stray.push(k); return; }
       LOG.keys.push(k);
+      if (TYPING.field && !(opts && opts.using)) { TYPING.buffer += k; return; }
       // Cmd+Shift+G opens the Go to Folder sheet on the Save panel, once the
       // world's slow-sheet settings allow it.
       if (k === 'g' && opts && (opts.using || []).indexOf('command down') >= 0) {
@@ -886,3 +896,89 @@ def test_cancel_does_not_send_esc_to_another_app():
     assert reply["ok"] is False
     assert "was not frontmost" in reply["error"]
     assert reply["_log"]["keys"] == [] and reply["_log"]["stray"] == []
+
+
+# ── Render Start / Render Length fields (issue 11) ───────────────
+
+
+def time_field_world(style="named", start=("1", "1", "1"), length=("4", "0", "0"), front="yes"):
+    """The Export dialog with its two bar.beat.sixteenth fields.
+
+    style "named": each part is a text field described "Render Start Bars" and so on.
+    style "grouped": a group labelled "Render Start" holding three unlabelled text fields.
+    """
+    def parts(label, values):
+        if style == "named":
+            return [{"role": "AXTextField", "description": f"{label} {unit}", "value": value,
+                     "press": "focusField"}
+                    for unit, value in zip(("Bars", "Beats", "Sixteenths"), values)]
+        return [{"role": "AXGroup", "name": label, "kids": [
+            {"role": "AXTextField", "value": value, "press": "focusField"} for value in values]}]
+    return {"front": front, "windows": [
+        {"role": "AXWindow", "subrole": "AXDialog", "name": "Export Audio/Video", "kids":
+            parts("Render Start", start) + parts("Render Length", length)
+            + [{"role": "AXButton", "description": "Cancel"}]},
+        {"role": "AXWindow", "subrole": "AXStandardWindow", "name": "Untitled"},
+    ]}
+
+
+@pytest.mark.parametrize("style", ["named", "grouped"])
+def test_get_time_field_reads_the_three_parts_as_numbers(style):
+    world = time_field_world(style)
+    start = drive("get_time_field", world, window="Export Audio/Video", label="Render Start")
+    length = drive("get_time_field", world, window="Export Audio/Video", label="Render Length")
+    assert start["fields"] == [1, 1, 1] and length["fields"] == [4, 0, 0]
+
+
+@pytest.mark.parametrize("style", ["named", "grouped"])
+def test_set_time_field_types_each_changed_part_and_reads_the_field_back(style):
+    reply = drive("set_time_field", time_field_world(style), window="Export Audio/Video",
+                  label="Render Length", fields=[14, 0, 0])
+    assert reply["ok"] is True, reply
+    assert reply["before"] == [4, 0, 0] and reply["after"] == [14, 0, 0]
+    # only the bars part differed, so only it was clicked and typed: "14", Return
+    assert reply["_log"]["keys"] == ["14", 36]
+    assert reply["_log"]["stray"] == []
+
+
+def test_set_time_field_leaves_parts_that_already_match_alone():
+    reply = drive("set_time_field", time_field_world(), window="Export Audio/Video",
+                  label="Render Start", fields=[1, 1, 1])
+    assert reply["before"] == reply["after"] == [1, 1, 1]
+    assert reply["_log"]["keys"] == [] and reply["_log"]["pressed"] == []
+
+
+def test_set_time_field_types_all_three_parts_in_order():
+    reply = drive("set_time_field", time_field_world(), window="Export Audio/Video",
+                  label="Render Start", fields=[5, 3, 2])
+    assert reply["after"] == [5, 3, 2]
+    assert reply["_log"]["keys"] == ["5", 36, "3", 36, "2", 36]
+
+
+def test_set_time_field_sends_no_key_when_live_is_not_frontmost():
+    reply = drive("set_time_field", time_field_world(front="never"), window="Export Audio/Video",
+                  label="Render Length", fields=[14, 0, 0])
+    assert reply["ok"] is False
+    assert "not frontmost" in reply["error"] and reply["_log"]["keys"] == []
+
+
+def test_a_field_with_other_than_three_parts_is_refused():
+    reply = drive("set_time_field", time_field_world(), window="Export Audio/Video",
+                  label="Render Length", fields=[14, 0])
+    assert reply["ok"] is False and "three parts" in reply["error"]
+
+
+def test_fields_that_are_not_in_the_dialog_say_so_and_point_at_the_dump_op():
+    world = export_dialog_world()
+    reply = drive("get_time_field", world, window="Export Audio/Video", label="Render Start")
+    assert reply["ok"] is False
+    assert "three parts of 'Render Start' were not found" in reply["error"] and "dump" in reply["error"]
+
+
+def test_dump_lists_every_element_of_a_window_with_its_labels_and_values():
+    reply = drive("dump", time_field_world(), window="Export Audio/Video")
+    assert reply["ok"] is True
+    rows = {(e["role"], e["description"]): e["value"] for e in reply["elements"]}
+    assert rows[("AXTextField", "Render Start Bars")] == "1"
+    assert rows[("AXTextField", "Render Length Bars")] == "4"
+    assert ("AXButton", "Cancel") in rows

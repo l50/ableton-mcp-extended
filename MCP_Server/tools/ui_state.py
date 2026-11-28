@@ -71,7 +71,7 @@ def get_ui_state(ctx: Context) -> str:
 def clear_selection(ctx: Context) -> str:
     """Remove the Arrangement time selection, then check the transport is as it was.
 
-    macOS only. A time selection left by a UI-driven tool (Edit > Select Loop)
+    macOS only. A time selection left behind (by a click or drag in a lane, say)
     makes stray keys nudge or delete clips and tracks. This replaces it with
     the insert marker using Playback > Move Insert Marker To Playhead: no
     click in a lane and no key is sent. When another view has focus and
