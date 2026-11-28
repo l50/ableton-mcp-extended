@@ -70,6 +70,10 @@ _TOOL_ARGS = {
                      "overwrite": True},
 }
 
+# Tools that drive Live's UI and send no Remote Script command. They are
+# never run here: they would reach for osascript, so they have their own tests.
+_UI_ONLY_TOOLS = {"get_ui_state", "clear_selection", "save_set", "save_set_as"}
+
 # Read commands whose names do not start with "get_".
 _NON_GET_READS = {"list_tracks"}
 
@@ -107,6 +111,8 @@ def sent_by_tool():
     sent = {}
     try:
         for name, tool in sorted(mcp_tools.items()):
+            if name in _UI_ONLY_TOOLS:
+                continue
             plugin_discovery.invalidate_external_plugin_cache()
             conn = MagicMock()
             conn.send_command.return_value = dict(_RESPONSE)

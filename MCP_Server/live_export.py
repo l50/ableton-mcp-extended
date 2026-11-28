@@ -3,13 +3,14 @@
 Live's File > Export Audio/Video is not part of the Live Object Model, so the
 Remote Script cannot trigger it. This module drives the dialog from the host
 side instead, through macOS UI scripting (System Events, via JavaScript for
-Automation run by ``osascript``). It is the only UI-automation path in the
-server and is deliberately self-contained: the LOM tools never import it.
+Automation run by ``osascript``). ``live_ui_state`` and ``live_save`` share its
+``JXADriver``; the LOM tools never import it.
 
 Flow:
 
-1. Check Live is running, is not already showing a dialog and has an
-   audio output device (from its Log.txt), then bring it to the front.
+1. Check Live is running, is not already showing a dialog, has an audio
+   output device (from its Log.txt) and is in a UI state safe to drive
+   (``live_ui_state.require_safe_to_drive``), then bring it to the front.
 2. Optionally give the Arrangement keyboard focus (Navigate > Arrangement
    View) and run Edit > Select Loop, so the dialog pre-fills Render Start
    and Render Length from the loop brace.
@@ -21,6 +22,8 @@ Flow:
 6. Poll until the render window is gone and the output file has stopped
    growing, then check the file with ``afinfo``: sample rate, bit depth and,
    when the caller says how long the range should be, length.
+7. When the export is no longer pending, clear the Arrangement time selection
+   and check the transport is unchanged (``live_ui_state.finish_ui_tool``).
 
 If any step from 3 on fails, the Save panel and Export dialog are
 cancelled and the run waits until Live shows no window the export opened.
@@ -50,6 +53,8 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+from MCP_Server import live_ui_state
 
 LIVE_BUNDLE_ID = "com.ableton.live"
 
@@ -281,7 +286,7 @@ def build_dialog_plan(request: ExportRequest) -> List[Dict[str, Any]]:
 # ── osascript driver ─────────────────────────────────────────────
 
 # JavaScript for Automation. Takes one JSON argument {op, ...}, prints JSON.
-JXA_DRIVER = r"""
+_JXA_BASE = r"""
 function run(argv) {
   var cmd = JSON.parse(argv[0]);
   try {
@@ -525,6 +530,11 @@ function dispatch(cmd) {
     return {running: true, frontmost: safe(function () { return p.frontmost(); }, false),
             windows: p.windows().map(windowInfo)};
   }
+  if (cmd.op === 'ui_state') {
+    var live = SE.processes.whose({bundleIdentifier: cmd.bundle});
+    if (live.length === 0) return {running: false};
+    return uiState(live[0], cmd);
+  }
   var p = proc(cmd);
   switch (cmd.op) {
     case 'activate':
@@ -698,9 +708,15 @@ function dispatch(cmd) {
       return {where: where, replaced: false};
     }
   }
+  var extra = dispatchUi(cmd, p);
+  if (extra !== undefined) return extra;
   throw new Error('unknown op ' + cmd.op);
 }
 """
+
+# The UI-state ops (Key/MIDI Map mode, dialogs, focus, selection) live with
+# their Python side in live_ui_state.py and share this script's helpers.
+JXA_DRIVER = _JXA_BASE + live_ui_state.UI_STATE_JXA
 
 
 _PERMISSION_HINT = (
@@ -866,8 +882,15 @@ class LiveExporter:
         platform: Optional[str] = None,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         audio_device: Optional[Callable[[], Optional[str]]] = None,
+        armed_reader: Optional[Callable[[], List[Dict[str, Any]]]] = None,
     ):
         self.driver = driver or JXADriver()
+        # Asks Live's Remote Script for the armed tracks (get_ui_state shows
+        # them); without it the UI state reports them as unknown.
+        self.armed_reader = armed_reader
+        # The transport as the UI guard found it, set by preflight; run()
+        # checks the transport against it when the export is over.
+        self.transport_before: Optional[Dict[str, Optional[bool]]] = None
         self.clock = clock or _Clock()
         self.afinfo = afinfo or _run_afinfo
         self.audio_device = audio_device or read_live_audio_output_device
@@ -947,8 +970,10 @@ class LiveExporter:
             )
         device = self.audio_device()
         if device is None:
-            return ["could not read Live's audio output device from its Log.txt; "
-                    "the audio interface was not checked"]
+            return self._guard_ui() + [
+                "could not read Live's audio output device from its Log.txt; "
+                "the audio interface was not checked"
+            ]
         if device.strip().lower() == NO_DEVICE.lower():
             raise ExportError(
                 "Live has no audio output device (its Log.txt says audio is disabled or "
@@ -957,7 +982,56 @@ class LiveExporter:
                 "reconnect it, or choose an output device in Live's Settings > Audio, "
                 "then export again"
             )
+        return self._guard_ui()
+
+    def _guard_ui(self) -> List[str]:
+        """Refuse unless Live's UI is safe to click in; remember the transport.
+
+        Key Map or MIDI Map mode, an open dialog and running playback all
+        change what a click or key does, so nothing is sent to Live then.
+        """
+        try:
+            state = live_ui_state.require_safe_to_drive(self.driver, self.armed_reader)
+        except live_ui_state.UnsafeUIState as e:
+            raise ExportError(
+                "Live's UI is not safe to drive: " + "; ".join(e.reasons) + ". Nothing was clicked"
+            ) from e
+        self.transport_before = live_ui_state.transport_snapshot(state)
+        armed = state.get("armed_tracks") or []
+        if armed:
+            names = ", ".join(str(t.get("name")) for t in armed)
+            return [f"tracks are armed in Live: {names}"]
         return []
+
+    def finalize(self, result: Dict[str, Any]) -> None:
+        """Leave Live as the export found it: no time selection, same transport.
+
+        Clears the selection Select Loop made and checks the transport
+        against what preflight saw, stopping playback a click started. The
+        outcome goes in the result (selection_cleared, transport_unchanged)
+        and a failure to clean up is a warning: the render itself is judged
+        by its file.
+        """
+        if self.transport_before is None:
+            return
+        if result.get("export_pending"):
+            result["selection_cleared"] = False
+            result["transport_unchanged"] = None
+            result.setdefault("warnings", []).append(
+                "Live was not left clean: Live's UI is not safe to touch while the export is pending"
+            )
+            return
+        outcome = live_ui_state.finish_ui_tool(self.driver, self.transport_before, self.armed_reader)
+        result["selection_cleared"] = outcome.get("selection_cleared")
+        result["transport_unchanged"] = outcome.get("transport_unchanged")
+        if outcome.get("stopped_playback"):
+            result.setdefault("warnings", []).append(
+                "playback started during the export and was stopped"
+            )
+        if outcome.get("error"):
+            result.setdefault("warnings", []).append(
+                "Live was not left clean: " + str(outcome["error"])
+            )
 
     def _settle(
         self, baseline: Sequence[str], timeout: float, earlier: bool = False
@@ -1033,6 +1107,7 @@ class LiveExporter:
 
     def run(self, request: ExportRequest) -> Dict[str, Any]:
         self.steps = []
+        self.transport_before = None
         result: Dict[str, Any] = {
             "ok": False,
             "status": "failed",
@@ -1062,6 +1137,7 @@ class LiveExporter:
             result["error"] = str(e)
         except Exception as e:  # never let an unexpected error read as success
             result["error"] = f"unexpected export error: {e}"
+        self.finalize(result)
         result["steps"] = self.steps
         return result
 

@@ -10,9 +10,11 @@ from MCP_Server.tools import (
     devices,
     export,
     recording,
+    save,
     session,
     take_lanes,
     tracks,
+    ui_state,
 )
 
 TOOL_MODULES = (
@@ -25,4 +27,6 @@ TOOL_MODULES = (
     devices,
     export,
     take_lanes,
+    ui_state,
+    save,
 )

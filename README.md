@@ -78,6 +78,12 @@ This project provides comprehensive, programmatic control over the Ableton Live 
     * Render the Arrangement's video along with the audio with `export_video`.
     * These drive Live's Export Audio/Video dialog through macOS UI scripting. See [Exporting audio and video](#exporting-audio-and-video-macos) for the requirements.
 
+* **UI state, selection and saving (macOS):**
+    * Read what Live's UI is doing with `get_ui_state`: Key Map and MIDI Map mode, open dialogs and their text, which view has focus, the transport, armed tracks and whether the Arrangement has a time selection.
+    * Remove a leftover time selection with `clear_selection`, which uses a menu command (no click in a lane) and checks the transport afterwards.
+    * Save the open Set with `save_set` (returns the path and the file's new modification time) or to a new file with `save_set_as`. They run only when called.
+    * Every tool that drives Live's UI (the export tools, `clear_selection`, `save_set`, `save_set_as`) checks the UI state first and refuses, clicking nothing, in Key Map or MIDI Map mode, with a dialog open, or while Live is playing or recording. See [UI state and safety](#ui-state-and-safety-macos).
+
 * **Voice & Audio Generation** 
     * Text-to-Speech Integration: Generate narration, vocal samples, or spoken elements through ElevenLabs MCP [included].
     * Custom Voice Creation: Clone voices for unique character in your tracks  
@@ -219,6 +225,18 @@ Example mcp-config.json:
 ```
 
 </details>
+
+---
+
+## UI state and safety (macOS)
+
+Key Map and MIDI Map mode, dialogs, keyboard focus and the Arrangement time selection are not in Live's Remote Script API, so `get_ui_state` reads them through macOS accessibility (the same Accessibility and Automation permissions as the export tools). Armed tracks come from Live itself.
+
+`get_ui_state` reports and never refuses. Its `safe_to_drive` is false, with the reasons in `unsafe_reasons`, in Key Map or MIDI Map mode, with any dialog open (the Export dialog, the Save panel, "Save changes?", the crash-recovery prompt and Live's other prompts), while playing or recording, with Computer MIDI Keyboard on, or when something could not be read. A value accessibility cannot tell apart is `null`, never a guess: for example `time_selection.present` is `null` while a view other than the Arrangement has focus. After a crash Live shows a "Report a Crash" help panel in its Learn View; that is a view, not a dialog, so `get_ui_state` reports it as `crash_report_panel: true` without treating the UI as unsafe.
+
+`export_audio`, `export_video`, `clear_selection`, `save_set` and `save_set_as` all run this check first and refuse. After an export the Arrangement has no time selection (the tool moves the insert marker to the playhead with Playback > Move Insert Marker To Playhead) and the transport is as it was; the reply says so in `selection_cleared` and `transport_unchanged`, and a click that started playback is stopped. Clip and track selections are not cleared.
+
+`save_set` needs a Set that already has a file (use `save_set_as` for an untitled one), and Live only enables Save while the Set has unsaved changes. Live saves a never-saved Set into a `<name> Project` folder it creates, so `save_set_as` returns the real `path` and the `requested_path`.
 
 ---
 

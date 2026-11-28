@@ -109,6 +109,14 @@ class FakeLive:
         self.extra_render_files = []   # e.g. a video written beside the audio
         self.b = dict(behaviour)
         self._rendering = None
+        # What Live's UI shows besides the export dialogs (get_ui_state reads it).
+        self.key_map = self.b.get("key_map", False)
+        self.midi_map = self.b.get("midi_map", False)
+        self.playing = self.b.get("playing", False)
+        self.recording = self.b.get("recording", False)
+        self.loop_on = self.b.get("loop_on", False)
+        self.time_selection = self.b.get("time_selection", False)
+        self.focus_group = self.b.get("focus_group", "Arrangement")
 
     # helpers
     def open_window(self, name, subrole="AXDialog", modal=False, texts=None):
@@ -151,6 +159,42 @@ class FakeLive:
                 "windows": [{k: w[k] for k in ("name", "subrole", "modal", "sheets")}
                             for w in self.windows]}
 
+    def op_ui_state(self):
+        if not self.running:
+            return {"ok": True, "running": False}
+        if self.b.get("ui_state_fails"):
+            return {"ok": False, "error": STATUS_ERROR, "code": -1712}
+        windows = []
+        for w in self.windows:
+            entry = {k: w[k] for k in ("name", "subrole", "modal", "sheets")}
+            if w["name"] == "My Song":
+                entry["main"] = True
+            else:
+                entry["texts"] = list(w.get("texts", []))
+                entry["buttons"] = []
+            windows.append(entry)
+        switches = {"Key Map Mode": self.key_map, "MIDI Map Mode": self.midi_map,
+                    "Computer MIDI Keyboard": False, "Play": self.playing,
+                    "Arrangement Record": self.recording, "Session Record": False,
+                    "MIDI Arrangement Overdub": False, "Arrangement Loop": self.loop_on,
+                    "Punch-In": False, "Punch-Out": False}
+        enabled = self.time_selection and self.focus_group == "Arrangement"
+        return {
+            "ok": True, "running": True, "frontmost": self.frontmost, "windows": windows,
+            "main": {"name": "My Song", "document": self.b.get("document"),
+                     "switches": switches, "groups": ["Control", "Arrangement", "Mixer"]},
+            "focus": [{"role": "AXStaticText", "description": "Arrangement Editor", "name": "Timeline"},
+                      {"role": "AXGroup", "description": "group", "name": self.focus_group},
+                      {"role": "AXWindow", "description": "standard window", "name": "My Song"}],
+            "edit": {"Cut Time": enabled, "Copy Time": enabled, "Duplicate Time": enabled,
+                     "Delete Time": enabled, "Delete": False},
+            "unreadable": [],
+        }
+
+    def op_stop_transport(self):
+        self.playing = False
+        return {"ok": True, "pressed": "Stop"}
+
     def op_activate(self):
         self.frontmost = self.b.get("comes_to_front", True)
         return {"ok": True, "frontmost": self.frontmost}
@@ -173,9 +217,15 @@ class FakeLive:
                 return {"ok": False, "disabled": True, "error": "menu item 'Navigate > Arrangement View' is disabled"}
             self.arrangement_focused = True
             return {"ok": True, "clicked": "Arrangement View"}
+        if path[0] == "Playback":
+            self.time_selection = False
+            if self.b.get("marker_starts_playback"):
+                self.playing = True
+            return {"ok": True, "clicked": path[1]}
         # Live only enables Select Loop while the Arrangement has keyboard focus.
         if not self.arrangement_focused or self.b.get("select_loop_disabled"):
             return {"ok": False, "disabled": True, "error": "menu item 'Edit > Select Loop' is disabled"}
+        self.time_selection = True
         return {"ok": True, "clicked": "Select Loop"}
 
     def op_keystroke(self, key, modifiers):
@@ -527,6 +577,7 @@ class TestExportSuccess:
         assert result["ok"] is True, result
         assert [m["path"] for m in live.driven("menu")] == [
             ["Navigate", "Arrangement View"], ["Edit", "Select Loop"], ["File", "Export Audio/Video"],
+            ["Playback", "Move Insert Marker To Playhead"],  # clears the selection afterwards
         ]
         assert [s.get("clicked") for s in result["steps"] if s["op"] == "menu"] == [
             "Arrangement View", "Select Loop", "Export Audio/Video...",
@@ -1010,7 +1061,7 @@ class TestPendingExport:
         assert le.EXPORT_DIALOG_TITLE not in live.names()
         # The idle check came after the cancels.
         last_cancel = max(i for i, c in enumerate(live.calls) if c["op"] == "cancel")
-        assert live.calls[-1]["op"] == "status" and len(live.calls) - 1 > last_cancel
+        assert any(c["op"] == "status" for c in live.calls[last_cancel + 1:])
 
     def test_late_save_panel_after_the_cancels_is_cancelled_before_live_reads_clear(
             self, tmp_path, clock):
@@ -1038,7 +1089,7 @@ class TestPendingExport:
         assert late_cancel > polls_after_cancel[1]
         # Clear was only reported after enough clean polls once the panel was gone.
         assert len([i for i in polls_after_cancel if i > late_cancel]) >= le.STABLE_POLLS
-        assert live.calls[-1]["op"] == "status"
+        assert any(c["op"] == "status" for c in live.calls[late_cancel + 1:])
 
     def test_save_panel_that_will_not_cancel_is_reported_pending(self, tmp_path, clock):
         live, exporter = make(clock, save_panel_times_out=True, uncancellable=(le.SAVE_PANEL_TITLE,))
