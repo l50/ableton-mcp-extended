@@ -484,9 +484,7 @@ def unsafe_reasons(state: dict[str, Any], ignore_transport: bool = False) -> lis
     reasons: list[str] = []
     # With no set window (Live is still starting behind a dialog) every switch is
     # unreadable for that one reason; say it once, below, instead of six times.
-    no_set_window = any(
-        item.startswith("the set window") for item in state.get("unreadable") or []
-    )
+    no_set_window = any(item.startswith("the set window") for item in state.get("unreadable") or [])
     if state.get("key_map_mode") is True:
         reasons.append(
             "Key Map mode is on (every click assigns a key); turn it off with the Key button "
